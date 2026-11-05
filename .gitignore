@@ -1,0 +1,9 @@
+# Local API keys — never commit
+karta/api.txt
+.env
+.env.*
+*.key
+
+# Build output and vendored reference clone
+karta/build/
+reference/

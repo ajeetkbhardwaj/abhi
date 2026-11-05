@@ -1,0 +1,7 @@
+/workspaces/abhi/karta/CMakeFiles/karta.dir
+/workspaces/abhi/karta/CMakeFiles/edit_cache.dir
+/workspaces/abhi/karta/CMakeFiles/rebuild_cache.dir
+/workspaces/abhi/karta/CMakeFiles/list_install_components.dir
+/workspaces/abhi/karta/CMakeFiles/install.dir
+/workspaces/abhi/karta/CMakeFiles/install/local.dir
+/workspaces/abhi/karta/CMakeFiles/install/strip.dir
