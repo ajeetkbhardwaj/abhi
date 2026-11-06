@@ -16,6 +16,7 @@
 #include "agent.h"
 #include "auth.h"
 #include "json.h"
+#include "mcp.h"
 #include "platform.h"
 #include "prompt.h"
 #include "provider.h"
@@ -172,6 +173,7 @@ void print_help() {
       "  -n, --name <name>              Session display name\n"
       "  -t, --tools <list>             Comma-separated tool allowlist (supports *)\n"
       "  -xt, --exclude-tools <list>    Comma-separated tool denylist\n"
+      "  --mcp <name=command>           Start an MCP stdio server; tools are exposed as mcp__<name>__<tool>\n"
       "  -nt, --no-tools                Disable all tools\n"
       "  -nbt, --no-builtin-tools       Disable built-in tools\n"
       "  --thinking <level>             off, minimal, low, medium, high, xhigh, max\n"
@@ -269,6 +271,14 @@ CliOptions parse_args(int argc, char** argv) {
       options.tui = true;
     } else if (arg == "--verbose") {
       options.verbose = true;
+    } else if (arg == "--mcp") {
+      const std::string value = need_value(i, arg);
+      const std::size_t eq = value.find('=');
+      if (eq == std::string::npos || eq == 0) {
+        std::cerr << "error: --mcp requires name=command format\n";
+        std::exit(2);
+      }
+      options.mcp_servers.push_back({value.substr(0, eq), value.substr(eq + 1), {}});
     } else if (!arg.empty() && arg[0] == '-' && arg != "-") {
       std::cerr << "error: unknown option " << arg << "\n";
       std::exit(2);
@@ -303,6 +313,92 @@ int run_cli(const CliOptions& options) {
   if (!options.no_tools && !options.no_builtin_tools) {
     for (ToolDefinition& tool : builtin_tools()) {
       if (tool_allowed(tool.name, options)) tools.push_back(std::move(tool));
+    }
+  }
+
+  // MCP servers: start each, list its tools, and register them as mcp__<server>__<tool>.
+  // Clients are kept alive for the whole run; a failed server only loses its own tools.
+  std::vector<std::unique_ptr<McpClient>> mcp_clients;
+  if (!options.no_tools && !options.mcp_servers.empty()) {
+    for (const auto& server : options.mcp_servers) {
+      McpStdioTransportOptions transport_options;
+      // Split "command arg1 arg2" on spaces (the command value of --mcp).
+      std::istringstream stream(server.command);
+      std::string token;
+      while (std::getline(stream, token, ' ')) {
+        if (token.empty()) continue;
+        if (transport_options.command.empty()) transport_options.command = token;
+        else transport_options.args.push_back(token);
+      }
+      if (transport_options.command.empty()) {
+        std::cerr << "warning: mcp server " << server.name << ": empty command, skipping\n";
+        continue;
+      }
+      transport_options.cwd = cwd;
+
+      auto client = std::make_unique<McpClient>(McpClientOptions{{"karta", kVersion, ""}, {}});
+      auto transport = std::make_unique<McpStdioTransport>(transport_options);
+      if (!client->connect(std::move(transport))) {
+        std::cerr << "warning: mcp server " << server.name << ": " << client->lastError() << "\n";
+        continue;
+      }
+      std::string tools_error;
+      const std::vector<McpTool> server_tools = client->listTools(&tools_error);
+      if (!tools_error.empty()) {
+        std::cerr << "warning: mcp server " << server.name << ": " << tools_error << "\n";
+        client->close();
+        continue;
+      }
+      auto mcp_client = client.get();
+      for (const McpTool& mcp_tool : server_tools) {
+        const std::string tool_name =
+            createMcpToolName(server.name, mcp_tool.name, [&](const std::string& name) {
+              return find_tool(tools, name) != nullptr;
+            });
+        if (find_tool(tools, tool_name) != nullptr) {
+          std::cerr << "warning: mcp server " << server.name << ": tool name " << tool_name
+                    << " already taken, skipping\n";
+          continue;
+        }
+        if (!tool_allowed(tool_name, options)) continue;
+
+        ToolDefinition tool;
+        tool.name = tool_name;
+        std::string description =
+            mcp_tool.description.empty() ? mcp_tool.name : mcp_tool.description;
+        if (!mcp_tool.annotations.title.empty()) description = mcp_tool.annotations.title;
+        if (!client->serverInfo().name.empty()) {
+          description += " (MCP server: " + client->serverInfo().name + " " +
+                         client->serverInfo().version + ")";
+        }
+        tool.description = description;
+        tool.parameters = normalizeMcpInputSchema(mcp_tool.inputSchema);
+        const std::string original_name = mcp_tool.name;
+        tool.execute = [mcp_client, original_name](const Json& args, ToolContext&) {
+          ToolOutcome outcome;
+          std::string error;
+          const McpCallToolResult result =
+              mcp_client->callTool(original_name, args, &error);
+          if (!error.empty()) {
+            outcome.text = error;
+            outcome.is_error = true;
+            return outcome;
+          }
+          std::string text = limitMcpOutput(mcpResultToText(result));
+          if (text.empty()) text = "(no output)";
+          // MCP reports tool failures in the result, not as a protocol error.
+          outcome.text = text;
+          outcome.is_error = result.isError;
+          return outcome;
+        };
+        tools.push_back(std::move(tool));
+      }
+      if (options.verbose) {
+        std::cerr << "karta: mcp server " << server.name << " connected ("
+                  << client->serverInfo().name << " " << client->serverInfo().version << ", "
+                  << server_tools.size() << " tools)\n";
+      }
+      mcp_clients.push_back(std::move(client));
     }
   }
 

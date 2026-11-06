@@ -70,7 +70,7 @@ class ModelPicker {
 
   AgentOptions* agent_options_;
   Session* session_;
-  tui::Tui& app_ = *static_cast<tui::Tui*>(nullptr);
+  tui::Tui* app_ = nullptr;
 
   int current_ = -1;
   std::string model_selected_;

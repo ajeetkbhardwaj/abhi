@@ -55,22 +55,24 @@ std::string truncate_to_width(const std::string& text, std::size_t max_width) {
   for (std::size_t i = 0; i < text.size();) {
     const unsigned char lead = static_cast<unsigned char>(text[i]);
     const std::size_t length = (lead >= 0xF0) ? 4 : (lead >= 0xE0 ? 3 : (lead >= 0xC0 ? 2 : 1));
-    if (i + length > text.size()) length = text.size() - i;
-    if (kept + length > max_width) break;
-    kept += length;
-    i += length;
+    const std::size_t chunk = (i + length > text.size()) ? text.size() - i : length;
+    if (kept + chunk > max_width) break;
+    kept += chunk;
+    i += chunk;
   }
   return text.substr(0, kept) + (max_width > 0 ? "…" : "");
 }
 }  // namespace
 
 SelectList::SelectList(std::vector<SelectItem> items, int max_visible, const SelectListTheme& theme,
-                       const SelectListLayoutOptions& layout)
+                       const SelectListLayoutOptions& layout,
+                       const OnSelect& on_select)
     : items_(std::move(items)),
       filtered_items_(items_),
       max_visible_(max_visible),
       theme_(theme),
-      layout_(layout) {}
+      layout_(layout),
+      on_select_(on_select) {}
 
 void SelectList::set_filter(const std::string& filter) {
   filtered_items_.clear();
@@ -107,17 +109,18 @@ std::vector<std::string> SelectList::render(std::size_t width) const {
     const SelectItem& item = filtered_items_[static_cast<std::size_t>(i)];
     const bool is_selected = i == selected_index_;
     const std::string description =
-        item.description ? normalize_to_single_line(item.description) : std::string();
-    lines.push_back(render_item(item, is_selected, actual_width, description,
-                                primary_column_width));
+        !item.description.empty() ? normalize_to_single_line(item.description) : std::string();
+    const std::vector<std::string> rendered =
+        render_item(item, is_selected, actual_width, description, primary_column_width);
+    lines.insert(lines.end(), rendered.begin(), rendered.end());
   }
 
   if (start_index > 0 || end_index < static_cast<int>(filtered_items_.size())) {
-    std::string scroll_text =
+    const std::string scroll_text =
         "  (" + std::to_string(selected_index_ + 1) + "/" +
         std::to_string(filtered_items_.size()) + ")";
     lines.push_back(theme_.scroll_info(truncate_to_width(scroll_text,
-                                                       actual_width - 2, "")));
+                                                         actual_width - 2)));
   }
 
   return lines;
@@ -126,70 +129,83 @@ std::vector<std::string> SelectList::render(std::size_t width) const {
 void SelectList::handle_mouse(MouseEvent event) {
   if (filtered_items_.empty()) return;
 
-  if (event.type == MouseEventType::Wheel && event.wheel_delta != 0) {
+  if (event.type == MouseEvent::MouseEventType::Wheel && event.wheel_delta != 0) {
     const int delta = event.wheel_delta < 0 ? -1 : 1;
     const int previous_index = selected_index_;
     selected_index_ = std::max(0, std::min(
         static_cast<int>(filtered_items_.size()) - 1, selected_index_ + delta));
-    if (selected_index_ != previous_index) notify_selection_change();
+    if (selected_index_ != previous_index) {
+      if (on_select_) on_select_(filtered_items_[static_cast<std::size_t>(selected_index_)]);
+    }
     return;
   }
 
-  // Hover must not change selection: the visible range is centered on it.
-  if (event.button != MouseButton::Left || (event.type != MouseEventType::Press &&
-                                             event.type != MouseEventType::Click))
+  if (event.button != MouseEvent::MouseButton::Left || (event.type != MouseEvent::MouseEventType::Press &&
+                                                         event.type != MouseEvent::MouseEventType::Click))
     return;
 
   const auto [start_index, end_index] = get_visible_range();
   const int item_index = start_index + event.y;
   if (item_index < start_index || item_index >= end_index) return;
 
-  if (event.type == MouseEventType::Press) {
+  if (event.type == MouseEvent::MouseEventType::Press) {
     mouse_pressed_index_ = item_index;
     if (selected_index_ != item_index) {
       selected_index_ = item_index;
-      notify_selection_change();
+      if (on_select_) on_select_(filtered_items_[static_cast<std::size_t>(selected_index_)]);
     }
     return;
   }
 
-  if (event.type == MouseEventType::Click) {
-    const int clicked_index = mouse_pressed_index_.has_value() ? mouse_pressed_index_.value()
-                                                                : item_index;
+  if (event.type == MouseEvent::MouseEventType::Click) {
+    const int clicked_index = mouse_pressed_index_.value_or(item_index);
     mouse_pressed_index_ = std::nullopt;
     const bool changed = selected_index_ != clicked_index;
     selected_index_ = clicked_index;
-    if (changed) notify_selection_change();
-    const SelectItem* selected_item = filtered_items_.empty() ? nullptr
-                                                              : &filtered_items_[selected_index_];
-    if (selected_item) on_select_.dispatch(*selected_item);
+    if (changed && on_select_) on_select_(filtered_items_[static_cast<std::size_t>(selected_index_)]);
   }
 }
 
 void SelectList::handle_input(const std::string& data) {
-  const KeybindingsManager& kb = get_keybindings();
-  const int page_index = get_select_page_index(kb, data, selected_index_, filtered_items_.size(),
-                                               max_visible_);
+  if (filtered_items_.empty()) return;
 
-  if (kb.matches(data, "tui.select.up")) {
+  // Up/down: wrap around the filtered list.
+  if (data == "\x1b[A" || data == "\x1bOA") {  // up arrow
     selected_index_ = selected_index_ <= 0 ? static_cast<int>(filtered_items_.size()) - 1
-                                             : selected_index_ - 1;
-    notify_selection_change();
-  } else if (kb.matches(data, "tui.select.down")) {
+                                           : selected_index_ - 1;
+    if (on_select_) on_select_(filtered_items_[static_cast<std::size_t>(selected_index_)]);
+    return;
+  }
+  if (data == "\x1b[B" || data == "\x1bOB") {  // down arrow
     selected_index_ = selected_index_ >= static_cast<int>(filtered_items_.size()) - 1 ? 0
-                                                                                      : selected_index_ +
-                                                                                          1;
-    notify_selection_change();
-  } else if (page_index != std::nullopt) {
-    if (filtered_items_.empty() || page_index == selected_index_) return;
-    selected_index_ = page_index;
-    notify_selection_change();
-  } else if (kb.matches(data, "tui.select.confirm")) {
-    if (!filtered_items_.empty() && on_select_) {
-      if (on_select_) on_select_(filtered_items_[selected_index_]);
+                                                                                      : selected_index_ + 1;
+    if (on_select_) on_select_(filtered_items_[static_cast<std::size_t>(selected_index_)]);
+    return;
+  }
+
+  // Digit keys jump to a numbered position (1-based).
+  if (data.size() == 1 && data[0] >= '1' && data[0] <= '9') {
+    const int page_index = data[0] - '1';
+    if (page_index >= 0 && page_index < static_cast<int>(filtered_items_.size()) &&
+        page_index != selected_index_) {
+      selected_index_ = page_index;
+      if (on_select_) on_select_(filtered_items_[static_cast<std::size_t>(selected_index_)]);
     }
-  } else if (kb.matches(data, "tui.select.cancel")) {
+    return;
+  }
+
+  // Enter confirms the selection.
+  if (data == "\n" || data == "\r") {
+    if (!filtered_items_.empty() && on_select_) {
+      on_select_(filtered_items_[static_cast<std::size_t>(selected_index_)]);
+    }
+    return;
+  }
+
+  // Escape cancels.
+  if (data == "\x1b") {
     if (on_cancel_) on_cancel_();
+    return;
   }
 }
 
@@ -225,6 +241,16 @@ int SelectList::get_primary_column_width(int width) const {
 
 std::string SelectList::get_display_value(const SelectItem& item) const {
   return item.label.empty() ? item.value : item.label;
+}
+
+std::string SelectList::truncate_primary(const SelectItem& item, bool is_selected, int max_width,
+                                         int effective_primary_column_width) const {
+  const std::string value = get_display_value(item);
+  if (layout_.truncate_primary) {
+    SelectListTruncatePrimaryContext ctx{value, max_width, effective_primary_column_width, item, is_selected};
+    return (*layout_.truncate_primary)(ctx);
+  }
+  return truncate_to_width(value, static_cast<std::size_t>(max_width));
 }
 
 std::vector<std::string> SelectList::render_item(const SelectItem& item, bool is_selected,

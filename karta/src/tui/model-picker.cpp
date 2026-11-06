@@ -66,11 +66,16 @@ void ModelPicker::update(Session& session) {
       job_state_ = JobState::Idle;
       return;
     }
-    // Flag the parent: the selection must be done with /model <id>.
-    if (!job_error_.empty()) {
-      app_.append_text("/model fetch failed: " + job_error_, tui::Style::Error);
-      return;
+    if (app_) {
+      app_->append_text("/model fetch failed: " + job_error_, tui::Style::Error);
     }
+    job_state_ = JobState::Idle;
+    return;
+  }
+
+  if (!app_) {
+    job_state_ = JobState::Idle;
+    return;
   }
 
   std::vector<SelectItem> items;
@@ -88,27 +93,27 @@ void ModelPicker::update(Session& session) {
 
   // Keep the whole catalog on screen: numbered entries in the visible window,
   // centred on the currently selected model.
-  const std::size_t rows = app_.rows();
+  const std::size_t rows = app_->rows();
   const std::size_t room = rows > 12 ? rows - 10 : 10;
   const std::size_t visible = std::min(job_models_.size(), room);
   for (std::size_t i = 0; i < visible; ++i) {
     const bool selected = i == static_cast<std::size_t>(current_);
     std::string line = "  " + std::to_string(i + 1) + ") " + job_models_[i];
     if (selected) line += "  ← current";
-    app_.append_text(line, selected ? Style::Success : Style::Normal);
+    app_->append_text(line, selected ? Style::Success : Style::Normal);
   }
   if (job_models_.size() > visible) {
-    app_.append_text("  … " + std::to_string(job_models_.size() - visible) +
-                     " more (type /model <id>)",
-                     Style::Dim);
+    app_->append_text("  … " + std::to_string(job_models_.size() - visible) +
+                      " more (type /model <id>)",
+                      Style::Dim);
   }
 
   const std::string catalog = job_models_.empty() ? std::string("unknown")
                                                   : job_models_[0];
-  app_.append_text("Available models for " + catalog + " →", Style::Bold);
-  app_.set_prompt("model #> ");
-  app_.set_status("select a model", false);
-  app_.append_text("Type a number and press Enter, or type a model id. Esc cancels.", Style::Dim);
+  app_->append_text("Available models for " + catalog + " →", Style::Bold);
+  app_->set_prompt("model #> ");
+  app_->set_status("select a model", false);
+  app_->append_text("Type a number and press Enter, or type a model id. Esc cancels.", Style::Dim);
 
   current_ = -1;
   job_state_ = JobState::Idle;
@@ -127,9 +132,9 @@ void ModelPicker::apply_selected_model_() {
   info.model = spec.model;
   info.cwd = "";
   info.id = "";
-  app_.set_header(info);
-  app_.append_text("model → " + spec.model, Style::Accent);
-  app_.set_status("ready · /login · /model", false);
+  app_->set_header(info);
+  app_->append_text("model → " + spec.model, Style::Accent);
+  app_->set_status("ready · /login · /model", false);
 }
 
 }  // namespace karta::tui

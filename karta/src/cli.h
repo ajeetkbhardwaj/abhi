@@ -25,6 +25,14 @@ struct CliOptions {
   std::vector<std::string> tool_exclude;
   std::vector<std::string> prompts;
 
+  // MCP servers: "name=command" (args may follow after spaces in the same value, or use --mcp-arg).
+  struct McpServerSpec {
+    std::string name;
+    std::string command;
+    std::vector<std::string> args;
+  };
+  std::vector<McpServerSpec> mcp_servers;
+
   bool provider_set = false;
   bool model_set = false;
   bool print = false;

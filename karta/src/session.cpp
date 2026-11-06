@@ -7,6 +7,7 @@
 #include <random>
 #include <sstream>
 
+#include "id.h"
 #include "platform.h"
 #include "provider.h"
 
@@ -104,7 +105,7 @@ std::unique_ptr<Session> Session::create(const std::string& cwd, const std::stri
   }
 
   auto session = std::unique_ptr<Session>(new Session());
-  session->record_.id = explicit_id.empty() ? random_id() : explicit_id;
+  session->record_.id = explicit_id.empty() ? karta::Id::session_id() : explicit_id;
   session->record_.cwd = cwd;
   session->record_.name = name;
   session->record_.path =
@@ -218,7 +219,7 @@ void Session::set_parent(const Json& entry) {
 }
 
 void Session::append_entry(Json entry) {
-  entry.set("id", random_id());
+  entry.set("id", karta::Id::uuidv7());
   if (!last_entry_id_.empty()) entry.set("parentId", last_entry_id_);
   else entry.set("parentId", Json());
   entry.set("timestamp", iso8601_now());

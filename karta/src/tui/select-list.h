@@ -102,7 +102,7 @@ class SelectList {
   std::vector<SelectItem> items_;
   std::vector<SelectItem> filtered_items_;
   int selected_index_ = 0;
-  int mouse_pressed_index_ = -1;
+  std::optional<int> mouse_pressed_index_;
   int max_visible_ = 5;
   SelectListTheme theme_;
   SelectListLayoutOptions layout_;

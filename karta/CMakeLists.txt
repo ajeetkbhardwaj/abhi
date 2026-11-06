@@ -25,10 +25,12 @@ add_executable(karta
   src/session.cpp
   src/prompt.cpp
   src/cli.cpp
+  src/telemetry.cpp
+  src/mcp.cpp
 )
 
 target_compile_options(karta PRIVATE -Wall -Wextra -Wno-unused-parameter)
-target_include_directories(karta PRIVATE src)
+target_include_directories(karta PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
