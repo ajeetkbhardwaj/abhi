@@ -56,6 +56,14 @@ AssistantTurn stream_completion(const ModelSpec& spec, const LlmRequest& request
 
 std::vector<std::string> known_providers();
 bool provider_is_anthropic(const std::string& provider);
+bool provider_is_local(const std::string& provider);
+std::string provider_env_var(const std::string& provider);
+
+// GETs the provider's model catalog (used by the TUI `/model` picker).
+// On failure returns an empty list and fills `error`. Setting `cancel` aborts
+// the request and reports "aborted", so quitting never blocks on the network.
+std::vector<std::string> fetch_models(const ModelSpec& spec, std::string* error,
+                                      const std::atomic<bool>* cancel = nullptr);
 
 // Canonical AgentMessage helpers, shared by the agent loop and session replay.
 Json make_user_message(const std::string& text);

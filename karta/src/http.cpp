@@ -92,4 +92,57 @@ HttpResponse http_post_stream(const std::string& url, const std::vector<std::str
   return result;
 }
 
+HttpResponse http_get(const std::string& url, const std::vector<std::string>& headers,
+                      const std::atomic<bool>* cancel) {
+  ensure_global_init();
+
+  HttpResponse result;
+  CURL* curl = curl_easy_init();
+  if (!curl) {
+    result.error = "failed to initialize libcurl";
+    return result;
+  }
+
+  curl_slist* header_list = nullptr;
+  for (const std::string& header : headers) header_list = curl_slist_append(header_list, header.c_str());
+
+  WriteState state;
+  state.sink = &result.body;
+
+  std::string error_buffer;
+  error_buffer.resize(CURL_ERROR_SIZE);
+
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+  curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer.data());
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+  curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "karta/0.1");
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+  if (cancel) {
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, cancel);
+  }
+
+  const CURLcode code = curl_easy_perform(curl);
+  if (code != CURLE_OK) {
+    if (code == CURLE_ABORTED_BY_CALLBACK && cancel && cancel->load()) {
+      result.error = "aborted";
+    } else {
+      result.error = error_buffer.empty() ? curl_easy_strerror(code) : error_buffer;
+    }
+  }
+
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.status);
+  curl_slist_free_all(header_list);
+  curl_easy_cleanup(curl);
+  return result;
+}
+
 }  // namespace karta

@@ -25,5 +25,6 @@ std::string iso8601_now();
 long long epoch_millis();
 std::string os_description();
 void enable_utf8_console();
+bool stdout_is_tty();
 
 }  // namespace karta

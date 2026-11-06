@@ -6,7 +6,7 @@ Karta is a faithful C++17 port of the pi agent core ("each and every features fr
 
 ```bash
 cd karta
-cmake -S . -B build
+cmake -S . -B build -DKARTA_BUILD_TUI=ON   # needs ncurses
 cmake --build build -j 4
 ```
 
@@ -23,6 +23,26 @@ KARTA_BASE_URL=http://127.0.0.1:8123/v1 ./karta/build/karta \
 # Text mode (REPL)
 ./karta/build/karta --mode text -p "What's my OS?"
 ```
+
+## Terminal UI
+
+```bash
+./karta/build/karta
+```
+
+With no prompt (and a TTY) karta opens the ncurses UI. From there:
+
+```
+/login            # pick a provider, paste its API key (masked, saved)
+/model            # list that provider's models and pick one
+/exit
+```
+
+The key is stored in `$HOME/.karta/auth.json` (0600, directory 0700, atomic
+write) so the next launch is already connected. `/logout` removes it. Keys are
+never printed or sent anywhere at login time. See `karta/docs/TUI.md`.
+
+Pipes and `-p` still use the plain text/JSON/RPC modes.
 
 ## Supported providers
 
@@ -57,6 +77,7 @@ KARTA_BASE_URL=http://127.0.0.1:8123/v1 ./karta/build/karta \
                            deepseek, xai, mistral, nvidia, ollama, lmstudio
 --model <id>               Model id (default varies by provider)
 --mode <text|json|rpc>     Output mode
+--tui                      Force the terminal UI (default on a TTY)
 -p <prompt>                Prompt
 -c, --session-id <id>      Use/create session by id
 --fork <path>              Fork into this directory
@@ -79,8 +100,8 @@ KARTA_BASE_URL=http://127.0.0.1:8123/v1 ./karta/build/karta \
 |-----------------|--------|--------------------------------|
 | packages/agent  | ✅     | Core loop, tool batches, events|
 | packages/ai     | ❌     | LLM integration (uses provider)|
-| packages/coding-agent | ❌ | Editors, MCP, TUI not ported |
-| packages/tui    | ❌     | No TUI (documented)            |
+| packages/coding-agent | 🟡 | Tools + CLI + sessions ported; editors/MCP not |
+| packages/tui    | ✅     | ncurses TUI, `/login`, `/model` (see docs/TUI.md) |
 | packages/mcp      | ❌     | MCP handshake not ported       |
 | packages/codemode | ❌    | Not ported                     |
 | packages/durable| ❌     | Not ported                     |

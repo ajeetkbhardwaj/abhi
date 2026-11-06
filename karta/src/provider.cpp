@@ -1,11 +1,14 @@
 #include "provider.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <vector>
 
+#include "auth.h"
 #include "http.h"
 
 namespace karta {
@@ -238,6 +241,9 @@ std::string get_api_key_from_env(const std::string& provider) {
     const std::string value = env_or_empty(it->second.env_key);
     if (!value.empty()) return value;
   }
+  // Keys saved by the TUI `/login` command.
+  const std::string stored = stored_api_key(provider);
+  if (!stored.empty()) return stored;
   // Generic fallbacks, so one key can drive compatible gateways.
   for (const char* name : {"KARTA_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"}) {
     const std::string value = env_or_empty(name);
@@ -257,6 +263,62 @@ std::vector<std::string> known_providers() {
 bool provider_is_anthropic(const std::string& provider) {
   const auto it = providers().find(provider);
   return it != providers().end() && it->second.anthropic;
+}
+
+bool provider_is_local(const std::string& provider) {
+  return provider == "ollama" || provider == "lmstudio";
+}
+
+std::string provider_env_var(const std::string& provider) {
+  const auto it = providers().find(provider);
+  return it == providers().end() ? std::string() : std::string(it->second.env_key);
+}
+
+std::vector<std::string> fetch_models(const ModelSpec& spec, std::string* error,
+                                      const std::atomic<bool>* cancel) {
+  std::vector<std::string> models;
+  if (spec.base_url.empty()) {
+    if (error) *error = "provider has no base URL";
+    return models;
+  }
+
+  const bool anthropic = provider_is_anthropic(spec.provider);
+  std::vector<std::string> headers = {"Accept: application/json"};
+  if (anthropic) {
+    if (!spec.api_key.empty()) headers.push_back("x-api-key: " + spec.api_key);
+    headers.push_back("anthropic-version: 2023-06-01");
+  } else if (!spec.api_key.empty()) {
+    headers.push_back("Authorization: Bearer " + spec.api_key);
+  }
+
+  const std::string url = spec.base_url + (anthropic ? "/v1/models" : "/models");
+  const HttpResponse response = http_get(url, headers, cancel);
+  if (!response.error.empty()) {
+    if (error) *error = response.error;
+    return models;
+  }
+  if (response.status < 200 || response.status >= 300) {
+    const Json parsed = Json::parse(response.body);
+    std::string message = parsed["error"]["message"].as_string();
+    if (message.empty()) message = parsed["message"].as_string();
+    if (error) *error = message.empty() ? ("HTTP " + std::to_string(response.status)) : message;
+    return models;
+  }
+
+  const Json parsed = Json::parse(response.body);
+  auto collect = [&models](const Json& list) {
+    for (const Json& item : list.items()) {
+      std::string id = item["id"].as_string();
+      if (id.empty()) id = item["name"].as_string();
+      if (!id.empty()) models.push_back(id);
+    }
+  };
+  collect(parsed["data"]);   // OpenAI / Anthropic / NVIDIA shape
+  collect(parsed["models"]); // Ollama shape
+
+  std::sort(models.begin(), models.end());
+  models.erase(std::unique(models.begin(), models.end()), models.end());
+  return models;
 }
 
 ModelSpec resolve_model_spec(const std::string& provider_arg, const std::string& model_arg,

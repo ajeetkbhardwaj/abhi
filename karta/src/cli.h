@@ -36,6 +36,7 @@ struct CliOptions {
   bool version = false;
   bool list_models = false;
   bool verbose = false;
+  bool tui = false;
 
   int max_turns = 0;
   long long compact_threshold = 100000;

@@ -9,9 +9,9 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Optional TUI toolkit (ncurses)
-# Set KARTA_BUILD_TUI=ON to enable the terminal UI submodule
-option(KARTA_BUILD_TUI "Build the terminal UI submodule" OFF)
+# Optional terminal UI (ncurses). When enabled, launching `karta` with no
+# prompt opens the TUI; /login and /model live there.
+option(KARTA_BUILD_TUI "Build the terminal UI (ncurses)" OFF)
 
 add_executable(karta
   src/main.cpp
@@ -19,6 +19,7 @@ add_executable(karta
   src/platform.cpp
   src/http.cpp
   src/provider.cpp
+  src/auth.cpp
   src/tools.cpp
   src/agent.cpp
   src/session.cpp
@@ -26,24 +27,32 @@ add_executable(karta
   src/cli.cpp
 )
 
-# Core compile options
 target_compile_options(karta PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_include_directories(karta PRIVATE src)
 
-# Conditional TUI source and ncurses link
+find_package(CURL REQUIRED)
+find_package(Threads REQUIRED)
+target_link_libraries(karta PRIVATE CURL::libcurl Threads::Threads)
+
 if(KARTA_BUILD_TUI)
-  find_package(NCurses REQUIRED)
-  target_include_directories(karta PRIVATE src)
-  target_link_libraries(karta PRIVATE CURL::libcurl Threads::Threads NCurses::NCursesNCurses)
-  
-  # TUI source files
-  target_sources(karta PRIVATE
-    src/tui.cpp
-    src/tui.h
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(NCURSES ncurses REQUIRED)
+
+  target_compile_definitions(karta PRIVATE KARTA_TUI)
+  target_include_directories(karta PRIVATE ${NCURSES_INCLUDE_DIRS})
+  target_link_libraries(karta PRIVATE ${NCURSES_LIBRARIES})
+  target_sources(karta PRIVATE    src/tui/screen.cpp
+  src/tui/screen.h
+  src/tui/app.cpp
+  src/tui/app.h
+  src/tui/model-picker.cpp
+  src/tui/model-picker.h
+  src/tui/select-list.cpp
+  src/tui/select-list.h
   )
-  
-  install(TARGETS karta RUNTIME DESTINATION bin)
-  # Also install the TUI shared concept (no binary, just headers)
+  message(STATUS "TUI enabled - `karta` opens the terminal UI when attached to a TTY")
 else()
-  install(TARGETS karta RUNTIME DESTINATION bin)
+  message(STATUS "TUI disabled - pass -DKARTA_BUILD_TUI=ON to build the terminal UI")
 endif()
+
+install(TARGETS karta RUNTIME DESTINATION bin)

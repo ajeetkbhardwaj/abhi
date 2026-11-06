@@ -5,6 +5,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "json.h"
@@ -39,6 +40,7 @@ class Agent {
   const std::vector<Json>& messages() const { return messages_; }
   void set_messages(std::vector<Json> messages) { messages_ = std::move(messages); }
   void set_system_prompt(std::string prompt) { options_.system_prompt = std::move(prompt); }
+  void set_model(ModelSpec model) { options_.model = std::move(model); }
   const AgentOptions& options() const { return options_; }
 
   void interrupt() { interrupted_.store(true); }

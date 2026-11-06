@@ -24,4 +24,8 @@ HttpResponse http_post_stream(const std::string& url, const std::vector<std::str
                               const std::string& body, const ChunkCallback& on_chunk,
                               const std::atomic<bool>* cancel = nullptr);
 
+// Simple GET that buffers the whole response body (provider model discovery).
+HttpResponse http_get(const std::string& url, const std::vector<std::string>& headers,
+                      const std::atomic<bool>* cancel = nullptr);
+
 }  // namespace karta

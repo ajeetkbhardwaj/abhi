@@ -7,3 +7,9 @@ karta/api.txt
 # Build output and vendored reference clone
 karta/build/
 reference/
+
+# Credentials saved by the TUI /login command
+.karta/
+CMakeFiles
+CMakeCache.txt
+cmake_install.cmake

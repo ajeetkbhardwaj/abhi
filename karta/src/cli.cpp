@@ -14,12 +14,17 @@
 #include <thread>
 
 #include "agent.h"
+#include "auth.h"
 #include "json.h"
 #include "platform.h"
 #include "prompt.h"
 #include "provider.h"
 #include "session.h"
 #include "tools.h"
+
+#ifdef KARTA_TUI
+#include "tui/app.h"
+#endif
 
 namespace karta {
 namespace {
@@ -146,6 +151,8 @@ void print_help() {
   std::cout <<
       "karta " << kVersion << " — a coding agent (C++ port of pi)\n\n"
       "Usage: karta [options] [prompt]\n\n"
+      "Running karta with no prompt opens the terminal UI. Use /login to connect a\n"
+      "provider with an API key and /model to pick from that provider's models.\n\n"
       "Options:\n"
       "  --provider <name>              Provider: anthropic, openai, openrouter, groq,\n"
       "                                 deepseek, xai, mistral, nvidia, ollama, lmstudio\n"
@@ -155,6 +162,7 @@ void print_help() {
       "  --append-system-prompt <text>  Append to the system prompt (repeatable)\n"
       "  --mode <mode>                  Output: text (default), json, or rpc\n"
       "  -p, --print                    Non-interactive: run the prompt and exit\n"
+      "  --tui                          Force the terminal UI (default on a TTY)\n"
       "  -c, --continue                 Continue the most recent session for this directory\n"
       "  --session <path>               Open a session by file path\n"
       "  --session-id <id>              Use or create a session with this id\n"
@@ -175,8 +183,9 @@ void print_help() {
       "  -h, --help                     Print this help\n\n"
       "Environment:\n"
       "  ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY,\n"
-      "  DEEPSEEK_API_KEY, XAI_API_KEY, MISTRAL_API_KEY, or KARTA_API_KEY\n"
-      "  KARTA_BASE_URL, KARTA_MODEL, KARTA_MAX_TOKENS, KARTA_THINKING\n";
+      "  DEEPSEEK_API_KEY, XAI_API_KEY, MISTRAL_API_KEY, NVIDIA_API_KEY, or KARTA_API_KEY\n"
+      "  KARTA_BASE_URL, KARTA_MODEL, KARTA_MAX_TOKENS, KARTA_THINKING\n\n"
+      "Credentials entered with /login are stored in " << auth_file_path() << " (0600).\n";
 }
 
 CliOptions parse_args(int argc, char** argv) {
@@ -256,6 +265,8 @@ CliOptions parse_args(int argc, char** argv) {
       options.max_turns = std::atoi(need_value(i, arg).c_str());
     } else if (arg == "--compact-threshold") {
       options.compact_threshold = std::atoll(need_value(i, arg).c_str());
+    } else if (arg == "--tui") {
+      options.tui = true;
     } else if (arg == "--verbose") {
       options.verbose = true;
     } else if (!arg.empty() && arg[0] == '-' && arg != "-") {
@@ -354,7 +365,32 @@ int run_cli(const CliOptions& options) {
   std::string system_prompt =
       build_system_prompt(tools, cwd, options.system_prompt, options.append_system_prompt);
 
+  AgentOptions agent_options;
+  agent_options.model = spec;
+  agent_options.system_prompt = std::move(system_prompt);
+  agent_options.tools = tools;
+  agent_options.cwd = cwd;
+  agent_options.max_turns = options.max_turns;
+  agent_options.compact_threshold = options.compact_threshold;
+
   const bool interactive = !options.print && options.prompts.empty() && options.mode == "text";
+
+#ifdef KARTA_TUI
+  // Bare `karta` opens the terminal UI; pipes and prompts keep the plain modes.
+  if (interactive && (options.tui || stdout_is_tty())) {
+    TuiAppOptions tui_options;
+    tui_options.agent = std::move(agent_options);
+    tui_options.session = session.get();
+    return run_tui_app(std::move(tui_options));
+  }
+#endif
+#ifndef KARTA_TUI
+  if (options.tui) {
+    std::cerr << "error: this build has no terminal UI; rebuild with -DKARTA_BUILD_TUI=ON\n";
+    return 2;
+  }
+#endif
+
   Printer printer(options, interactive);
   const std::string model_label = spec.model.rfind(spec.provider + "/", 0) == 0
                                       ? spec.model
@@ -369,14 +405,6 @@ int run_cli(const CliOptions& options) {
     std::cerr << "warning: no API key found for " << spec.provider
               << "; set the provider's env var or pass --api-key\n";
   }
-
-  AgentOptions agent_options;
-  agent_options.model = spec;
-  agent_options.system_prompt = std::move(system_prompt);
-  agent_options.tools = tools;
-  agent_options.cwd = cwd;
-  agent_options.max_turns = options.max_turns;
-  agent_options.compact_threshold = options.compact_threshold;
 
   Agent agent(
       agent_options, [&](const AgentEvent& event) {

@@ -33,6 +33,16 @@ This document catalogs the status of each feature from the original `pi`/pi-agen
 - ✅ `ls` (500 entries max)
 - ✅ `powershell` on Windows abstraction in platform.cpp
 
+### packages/tui — Terminal UI
+- ✅ ncurses UI in `karta/src/tui/` (`screen.{h,cpp}`, `app.{h,cpp}`), built with `-DKARTA_BUILD_TUI=ON`
+- ✅ Transcript with wrapping, scrollback, streaming assistant text, tool lines
+- ✅ Single-line editor: UTF-8 cursor movement, history, masked secret input
+- ✅ Status-line spinner and header (provider, model, cwd, session id)
+- ✅ `/login`, `/logout`, `/model` provider connection flow with saved credentials
+- ✅ Agent and model-fetch workers with cancellation (Esc aborts HTTP)
+- ❌ Markdown rendering, images, mouse, clipboard, autocomplete, themes, kill-ring/undo
+- See `karta/docs/TUI.md` for the pi-component mapping
+
 ### Core infrastructure
 - ✅ JSON parser/serializer (UTF-8 escapes, integer-preserving dump) in `karta/src/json.{h,cpp}`
 - ✅ libcurl POST streaming with cancel via XFERINFO, 64MB body cap in `karta/src/http.{h,cpp}`
@@ -50,7 +60,6 @@ This document catalogs the status of each feature from the original `pi`/pi-agen
 
 | Package | Status | Notes |
 |---------|--------|-------|
-| `packages/tui` | ❌ | No TUI. Karta is a headless agent core. |
 | `packages/mcp` | ❌ | Multi-Console-Protocol handshake not ported. |
 | `packages/codemode` | ❌ | Not ported. |
 | `packages/durable` | ❌ | Not ported. |
@@ -64,7 +73,8 @@ This document catalogs the status of each feature from the original `pi`/pi-agen
 ## Known gaps / unsupported features (from original pi)
 
 - MCP handshake and message persistence across connections
-- TUI / REPL color themes
+- TUI color themes, markdown rendering, images, mouse, clipboard, kill-ring/undo
+- Line REPL (non-TTY fallback) color themes
 - Durable session checkpointing beyond JSONL v3
 - Chord protocol / peer-to-peer features
 - Evals / structured test-harness orchestration
@@ -97,10 +107,12 @@ karta\build\karta.exe --provider nvidia --model nvidia/nemotron-3.5-lightning-30
 
 ### Key management
 
-- `karta/api.txt` contains `NVIDIA_API_KEY=nvapi-...` (85 bytes)
+- `/login` saves provider keys to `$HOME/.karta/auth.json` (0700 directory, 0600 file, atomic write)
+- `/logout` removes the saved key for a provider
+- `karta/api.txt` contains `NVIDIA_API_KEY=nvapi-...` (85 bytes, gitignored)
 - `.gitignore` excludes `karta/api.txt`, `karta/build/`, and `reference/`
 - `chmod 600 karta/api.txt` recommended
-- Keys are read from the environment only — never passed in argv or printed
+- Keys come from the provider env var, the saved auth file, or `--api-key` — never printed and never sent at login time
 
 ## Verification evidence
 
@@ -116,6 +128,6 @@ karta\build\karta.exe --provider nvidia --model nvidia/nemotron-3.5-lightning-30
 
 1. Add remaining pi packages (codemode, durable, chord, telemetry, evals)
 2. Full MCP handshake implementation
-3. TUI mode (ncurses-based)
+3. TUI extras: markdown rendering, themes, multi-line editor
 4. Extended tool set (glob improvements, recursive find)
 5. Additional provider back-ends (openrouter, xai, deepseek)

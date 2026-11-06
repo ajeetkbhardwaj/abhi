@@ -11,6 +11,7 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <io.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -144,6 +145,14 @@ void enable_utf8_console() {
 #ifdef _WIN32
   SetConsoleOutputCP(CP_UTF8);
   SetConsoleCP(CP_UTF8);
+#endif
+}
+
+bool stdout_is_tty() {
+#ifdef _WIN32
+  return _isatty(_fileno(stdout)) != 0;
+#else
+  return isatty(STDOUT_FILENO) != 0;
 #endif
 }
 
