@@ -58,3 +58,13 @@ else()
 endif()
 
 install(TARGETS karta RUNTIME DESTINATION bin)
+  target_sources(karta PRIVATE
+    src/tui/text.cpp
+    src/tui/text.h
+    src/tui/loader.cpp
+    src/tui/loader.h
+    src/tui/scroll-view.cpp
+    src/tui/scroll-view.h
+    src/tui/editor.cpp
+    src/tui/editor.h
+  )
