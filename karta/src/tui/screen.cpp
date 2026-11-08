@@ -1,7 +1,9 @@
-#include "tui/screen.h"
+#include "karta/tui/screen.h"
 
 #include <curses.h>
 
+#include <clocale>
+#include <cwchar>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -67,6 +69,8 @@ int style_attr(Style style, bool colors) {
       return A_BOLD | (colors ? COLOR_PAIR(2) : 0);
     case Style::User:
       return A_BOLD | (colors ? COLOR_PAIR(3) : 0);
+    case Style::Assistant:
+      return colors ? COLOR_PAIR(1) : A_NORMAL;
     case Style::Success:
       return colors ? COLOR_PAIR(4) : A_BOLD;
     case Style::Error:
@@ -91,6 +95,7 @@ bool Tui::init(const TuiOptions& options) {
   if (running_) return true;
   (void)options;
 
+  setlocale(LC_ALL, "");
   initscr();
   if (stdscr == nullptr) return false;
 
@@ -98,6 +103,8 @@ bool Tui::init(const TuiOptions& options) {
   noecho();
   keypad(stdscr, TRUE);
   nodelay(stdscr, TRUE);
+  mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
+  mouseinterval(0);
 #ifdef NCURSES_VERSION
   set_escdelay(25);
 #endif
@@ -192,11 +199,11 @@ void Tui::stream_end() {
   streaming_ = false;
   stream_buffer_.clear();
   if (!lines_.empty() && lines_.back().text.empty()) lines_.pop_back();
-  if (!lines_.empty() && !lines_.back().text.empty()) {
-    lines_.push_back({Style::Normal, ""});
-  }
+  if (!lines_.empty() && !lines_.back().text.empty()) lines_.push_back({Style::Normal, ""});
 }
 
+void Tui::set_overlay(const std::vector<std::string>& lines, int selected) { overlay_lines_ = lines; overlay_selected_ = selected; }
+void Tui::clear_overlay() { overlay_lines_.clear(); overlay_selected_ = -1; }
 void Tui::clear_transcript() {
   lines_.clear();
   streaming_ = false;
@@ -218,8 +225,24 @@ std::size_t Tui::text_width() const {
 }
 
 std::size_t Tui::visible_rows() const {
-  if (rows_ < 10) return 1;
-  return rows_ - 5;  // transcript occupies rows 2 .. rows_-4
+  if (rows_ < 11) return 1;
+  return rows_ - 6;  // transcript: rows 2..rows_-5; status rows_-4, rule rows_-3, input rows_-2, rule rows_-1
+}
+
+
+void Tui::scroll_up(std::size_t n) {
+  if (n == 0) n = visible_rows() > 3 ? 3 : 1;
+  scroll_ += n;
+}
+void Tui::scroll_down(std::size_t n) {
+  if (n == 0) n = visible_rows() > 3 ? 3 : 1;
+  scroll_ = scroll_ > n ? scroll_ - n : 0;
+}
+bool Tui::in_transcript(int row) const {
+  // transcript occupies rows 2 .. rows_-5
+  if (rows_ < 11) return false;
+  int overlay_n = static_cast<int>(overlay_lines_.size()); int max_overlay = (rows_ > 12) ? 8 : 4; if (overlay_n > max_overlay) overlay_n = max_overlay;
+  return row >= 2 && row < static_cast<int>(rows_) - 4 - overlay_n;
 }
 
 void Tui::trim_transcript() {
@@ -233,6 +256,31 @@ Key Tui::poll(int* out_ch) {
 
   const int ch = wgetch(stdscr);
   if (ch == ERR) return Key::None;
+
+  if (ch == KEY_MOUSE) {
+    MEVENT ev;
+    if (getmouse(&ev) == OK) {
+      const bool in_tx = in_transcript(ev.y);
+#if NCURSES_MOUSE_VERSION >= 2
+      if (ev.bstate & BUTTON4_PRESSED) { if (in_tx) scroll_up(3); return Key::Mouse; }
+      if (ev.bstate & BUTTON5_PRESSED) { if (in_tx) scroll_down(3); return Key::Mouse; }
+#endif
+#ifdef BUTTON4_PRESSED
+      if (ev.bstate & BUTTON4_PRESSED) { if (in_tx) scroll_up(3); return Key::Mouse; }
+#endif
+#ifdef BUTTON5_PRESSED
+      if (ev.bstate & BUTTON5_PRESSED) { if (in_tx) scroll_down(3); return Key::Mouse; }
+#endif
+      if (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_RELEASED)) {
+        // Click in transcript: keep transcript scroll active (no input steal).
+        // Scroll is handled by wheel/PgUp/PgDn; click is a safe no-op.
+        (void)in_tx;
+        return Key::Mouse;
+      }
+      if (ev.bstate & REPORT_MOUSE_POSITION) return Key::Mouse;
+    }
+    return Key::Mouse;
+  }
 
   if (ch == KEY_RESIZE) {
     getmaxyx(stdscr, rows_, cols_);
@@ -255,6 +303,10 @@ Key Tui::poll(int* out_ch) {
 
     case 3:  // Ctrl+C
       return Key::CtrlC;
+    case 4:  // Ctrl+D
+      return Key::CtrlD;
+    case 12: // Ctrl+L
+      return Key::CtrlL;
     case 27:  // Escape
       return Key::Escape;
 
@@ -351,15 +403,40 @@ Key Tui::poll(int* out_ch) {
   return Key::None;
 }
 
+static void put_line(int row, const std::string& text, std::size_t cols) {
+  mvhline(row, 0, ' ', static_cast<int>(cols));
+  std::mbstate_t state{};
+  const char* src = text.c_str();
+  size_t len = std::mbsrtowcs(nullptr, &src, 0, &state);
+  if (len == static_cast<size_t>(-1)) {
+    mvaddnstr(row, 0, text.c_str(), static_cast<int>(cols) - 1);
+    return;
+  }
+  state = std::mbstate_t{};
+  src = text.c_str();
+  std::wstring ws(len, L'\0');
+  std::mbsrtowcs(ws.data(), &src, len, &state);
+  // Truncate by display width
+  std::wstring out;
+  int width = 0;
+  int maxw = static_cast<int>(cols) - 1;
+  for (wchar_t wc : ws) {
+    int w = wcwidth(wc);
+    if (w < 0) w = 0;
+    if (width + w > maxw) break;
+    out.push_back(wc);
+    width += w;
+  }
+  mvaddnwstr(row, 0, out.c_str(), static_cast<int>(out.size()));
+}
+
 void Tui::draw() {
   if (!running_) return;
 
   erase();
 
   attron(A_REVERSE | A_BOLD);
-  mvhline(0, 0, ' ', static_cast<int>(cols_));
-  const std::string header = " " + header_;
-  mvaddnstr(0, 0, header.c_str(), static_cast<int>(cols_) - 1);
+  put_line(0, " " + header_, cols_);
   attroff(A_REVERSE | A_BOLD);
 
   attron(A_DIM);
@@ -375,32 +452,56 @@ void Tui::draw() {
     start = max_scroll - scroll_;
   }
 
-  for (std::size_t i = 0; i < visible; ++i) {
-    if (start + i >= total) break;
-    const Line& line = lines_[start + i];
+  // reserve space for overlay above status
+  int overlay_n = static_cast<int>(overlay_lines_.size());
+  int max_overlay = (rows_ > 12) ? 8 : 4;
+  if (overlay_n > max_overlay) overlay_n = max_overlay;
+  std::size_t vis = visible;
+  if (vis > static_cast<std::size_t>(overlay_n)) vis -= static_cast<std::size_t>(overlay_n);
+
+  std::size_t st = 0;
+  if (total > vis) {
+    const std::size_t max_scroll = total - vis;
+    if (scroll_ > max_scroll) scroll_ = max_scroll;
+    st = max_scroll - scroll_;
+  }
+  for (std::size_t i = 0; i < vis; ++i) {
+    if (st + i >= total) break;
+    const Line& line = lines_[st + i];
     const int attr = style_attr(line.style, colors_);
     if (attr != A_NORMAL) attron(attr);
-    mvaddnstr(static_cast<int>(2 + i), 0, line.text.c_str(), static_cast<int>(cols_) - 1);
+    put_line(static_cast<int>(2 + i), line.text, cols_);
     if (attr != A_NORMAL) attroff(attr);
+  }
+  // overlay box
+  int oy = static_cast<int>(2 + vis);
+  for (int i = 0; i < overlay_n; ++i) {
+    bool sel = (i == overlay_selected_);
+    if (sel) attron(A_REVERSE | A_BOLD);
+    else attron(A_DIM);
+    std::string ol = (sel?" > ":"   ") + overlay_lines_[static_cast<size_t>(i)];
+    put_line(oy + i, ol, cols_);
+    if (sel) attroff(A_REVERSE | A_BOLD); else attroff(A_DIM);
   }
 
   std::string status = status_;
   if (status_busy_) status = std::string(spinner_frame(frame_++)) + " " + status;
 
   attron(A_DIM);
-  mvhline(static_cast<int>(rows_) - 3, 0, ' ', static_cast<int>(cols_));
-  mvaddnstr(static_cast<int>(rows_) - 3, 0, status.c_str(), static_cast<int>(cols_) - 1);
-  mvhline(static_cast<int>(rows_) - 2, 0, ACS_HLINE, static_cast<int>(cols_));
+  put_line(static_cast<int>(rows_) - 4, status, cols_);
+  mvhline(static_cast<int>(rows_) - 3, 0, ACS_HLINE, static_cast<int>(cols_));
   attroff(A_DIM);
 
   const std::string shown = input_hidden_ ? std::string(input_.size(), '*') : input_;
-  const std::string edit_line = prompt_ + shown;
-  mvhline(static_cast<int>(rows_) - 1, 0, ' ', static_cast<int>(cols_));
-  mvaddnstr(static_cast<int>(rows_) - 1, 0, edit_line.c_str(), static_cast<int>(cols_) - 1);
+  put_line(static_cast<int>(rows_) - 2, prompt_ + shown, cols_);
+
+  attron(A_DIM);
+  mvhline(static_cast<int>(rows_) - 1, 0, ACS_HLINE, static_cast<int>(cols_));
+  attroff(A_DIM);
 
   std::size_t cursor_col = display_width(prompt_) + display_width(input_.substr(0, cursor_));
   if (cursor_col >= cols_) cursor_col = cols_ - 1;
-  move(static_cast<int>(rows_) - 1, static_cast<int>(cursor_col));
+  move(static_cast<int>(rows_) - 2, static_cast<int>(cursor_col));
 
   refresh();
 }

@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "json.h"
+#include "karta/core/json.h"
 
 namespace karta {
 
@@ -31,13 +31,16 @@ struct AssistantTurn {
   std::string error;
 };
 
+std::string normalize_thinking(const std::string& level);
+std::string thinking_label(const std::string& level);
+
 struct ModelSpec {
   std::string provider = "anthropic";
   std::string model = "claude-sonnet-4-5";
   std::string base_url;
   std::string api_key;
   int max_tokens = 8192;
-  std::string thinking = "off";
+  std::string thinking = "low"; // 0 off, 1 default/low, 2 medium, 3 high
 };
 
 struct LlmRequest {

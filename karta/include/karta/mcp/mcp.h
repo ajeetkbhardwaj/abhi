@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "json.h"
+#include "karta/core/json.h"
 
 namespace karta {
 

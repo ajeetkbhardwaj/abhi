@@ -9,28 +9,32 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Optional terminal UI (ncurses). When enabled, launching `karta` with no
-# prompt opens the TUI; /login and /model live there.
 option(KARTA_BUILD_TUI "Build the terminal UI (ncurses)" OFF)
 
+# Categorized subproject sources (canonical). Public headers: include/karta/<category>/.
 add_executable(karta
   src/main.cpp
-  src/json.cpp
-  src/platform.cpp
-  src/http.cpp
-  src/provider.cpp
-  src/auth.cpp
-  src/tools.cpp
-  src/agent.cpp
-  src/session.cpp
-  src/prompt.cpp
-  src/cli.cpp
-  src/telemetry.cpp
-  src/mcp.cpp
+  src/agent/agent.cpp
+  src/agent/prompt.cpp
+  src/ai/http.cpp
+  src/ai/provider.cpp
+  src/cli/cli.cpp
+  src/core/auth.cpp
+  src/core/id.cpp
+  src/core/json.cpp
+  src/core/platform.cpp
+  src/core/telemetry.cpp
+  src/mcp/mcp.cpp
+  src/session/session.cpp
+  src/tools/tools.cpp
 )
 
 target_compile_options(karta PRIVATE -Wall -Wextra -Wno-unused-parameter)
-target_include_directories(karta PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Headers from include/ (karta/...). src/ retained for local/private resolution only.
+target_include_directories(karta PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
@@ -38,19 +42,23 @@ target_link_libraries(karta PRIVATE CURL::libcurl Threads::Threads)
 
 if(KARTA_BUILD_TUI)
   find_package(PkgConfig REQUIRED)
-  pkg_check_modules(NCURSES ncurses REQUIRED)
+  pkg_check_modules(NCURSES ncursesw QUIET)
+  if(NOT NCURSES_FOUND)
+    pkg_check_modules(NCURSES ncurses REQUIRED)
+  endif()
 
   target_compile_definitions(karta PRIVATE KARTA_TUI)
   target_include_directories(karta PRIVATE ${NCURSES_INCLUDE_DIRS})
   target_link_libraries(karta PRIVATE ${NCURSES_LIBRARIES})
-  target_sources(karta PRIVATE    src/tui/screen.cpp
-  src/tui/screen.h
-  src/tui/app.cpp
-  src/tui/app.h
-  src/tui/model-picker.cpp
-  src/tui/model-picker.h
-  src/tui/select-list.cpp
-  src/tui/select-list.h
+  target_sources(karta PRIVATE
+    src/tui/screen.cpp
+    src/tui/app.cpp
+    src/tui/model-picker.cpp
+    src/tui/select-list.cpp
+    src/tui/text.cpp
+    src/tui/loader.cpp
+    src/tui/scroll-view.cpp
+    src/tui/editor.cpp
   )
   message(STATUS "TUI enabled - `karta` opens the terminal UI when attached to a TTY")
 else()
@@ -58,13 +66,3 @@ else()
 endif()
 
 install(TARGETS karta RUNTIME DESTINATION bin)
-  target_sources(karta PRIVATE
-    src/tui/text.cpp
-    src/tui/text.h
-    src/tui/loader.cpp
-    src/tui/loader.h
-    src/tui/scroll-view.cpp
-    src/tui/scroll-view.h
-    src/tui/editor.cpp
-    src/tui/editor.h
-  )

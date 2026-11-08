@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "tui/text.h"
+#include "karta/tui/text.h"
 
 namespace karta::tui {
 

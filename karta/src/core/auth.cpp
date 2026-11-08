@@ -1,4 +1,4 @@
-#include "auth.h"
+#include "karta/core/auth.h"
 
 #include <filesystem>
 #include <fstream>
@@ -6,8 +6,8 @@
 #include <sstream>
 #include <string>
 
-#include "json.h"
-#include "platform.h"
+#include "karta/core/json.h"
+#include "karta/core/platform.h"
 
 #ifdef _WIN32
 #include <io.h>

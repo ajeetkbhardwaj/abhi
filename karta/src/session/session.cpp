@@ -1,4 +1,4 @@
-#include "session.h"
+#include "karta/session/session.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -7,9 +7,9 @@
 #include <random>
 #include <sstream>
 
-#include "id.h"
-#include "platform.h"
-#include "provider.h"
+#include "karta/core/id.h"
+#include "karta/core/platform.h"
+#include "karta/ai/provider.h"
 
 namespace fs = std::filesystem;
 

@@ -8,9 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "json.h"
-#include "provider.h"
-#include "tools.h"
+#include "karta/core/json.h"
+#include "karta/ai/provider.h"
+#include "karta/tools/tools.h"
 
 namespace karta {
 

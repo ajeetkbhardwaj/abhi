@@ -1,4 +1,4 @@
-#include "tui/editor.h"
+#include "karta/tui/editor.h"
 #include <algorithm>
 
 namespace karta::tui {

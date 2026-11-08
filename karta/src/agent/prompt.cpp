@@ -1,10 +1,10 @@
-#include "prompt.h"
+#include "karta/agent/prompt.h"
 
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 
-#include "platform.h"
+#include "karta/core/platform.h"
 
 namespace fs = std::filesystem;
 

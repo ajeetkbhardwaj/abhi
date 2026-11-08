@@ -1,4 +1,4 @@
-#include "tui/text.h"
+#include "karta/tui/text.h"
 #include <algorithm>
 
 namespace karta::tui {

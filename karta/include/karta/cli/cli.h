@@ -12,7 +12,7 @@ struct CliOptions {
   std::string api_key;
   std::string system_prompt;
   std::vector<std::string> append_system_prompt;
-  std::string thinking = "off";
+  std::string thinking = "low"; // 0 off, 1 default/low, 2 medium, 3 high
   std::string mode = "text";  // text | json | rpc
 
   std::string session_path;

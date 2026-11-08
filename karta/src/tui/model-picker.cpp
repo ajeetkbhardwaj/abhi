@@ -5,18 +5,18 @@
 // fetch_models), render a numbered SelectList, apply the selection, and
 // restore the ready state. Esc always cancels a fetch.
 
-#include "tui/model-picker.h"
+#include "karta/tui/model-picker.h"
 
 #include <algorithm>
 #include <cstdlib>
 
-#include "agent.h"
-#include "auth.h"
-#include "json.h"
-#include "provider.h"
-#include "session.h"
-#include "tui/app.h"
-#include "tui/screen.h"
+#include "karta/agent/agent.h"
+#include "karta/core/auth.h"
+#include "karta/core/json.h"
+#include "karta/ai/provider.h"
+#include "karta/session/session.h"
+#include "karta/tui/app.h"
+#include "karta/tui/screen.h"
 
 namespace karta::tui {
 

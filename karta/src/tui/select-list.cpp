@@ -7,14 +7,14 @@
 //
 // Karta uses this for /model and /provider catalogs.
 
-#include "tui/select-list.h"
+#include "karta/tui/select-list.h"
 
 #include <algorithm>
 #include <cctype>
 #include <string>
 #include <vector>
 
-#include "tui/screen.h"
+#include "karta/tui/screen.h"
 
 namespace karta::tui {
 namespace {

@@ -1,4 +1,4 @@
-#include "cli.h"
+#include "karta/cli/cli.h"
 
 #include <algorithm>
 #include <atomic>
@@ -13,18 +13,18 @@
 #include <sstream>
 #include <thread>
 
-#include "agent.h"
-#include "auth.h"
-#include "json.h"
-#include "mcp.h"
-#include "platform.h"
-#include "prompt.h"
-#include "provider.h"
-#include "session.h"
-#include "tools.h"
+#include "karta/agent/agent.h"
+#include "karta/core/auth.h"
+#include "karta/core/json.h"
+#include "karta/mcp/mcp.h"
+#include "karta/core/platform.h"
+#include "karta/agent/prompt.h"
+#include "karta/ai/provider.h"
+#include "karta/session/session.h"
+#include "karta/tools/tools.h"
 
 #ifdef KARTA_TUI
-#include "tui/app.h"
+#include "karta/tui/app.h"
 #endif
 
 namespace karta {
@@ -176,7 +176,7 @@ void print_help() {
       "  --mcp <name=command>           Start an MCP stdio server; tools are exposed as mcp__<name>__<tool>\n"
       "  -nt, --no-tools                Disable all tools\n"
       "  -nbt, --no-builtin-tools       Disable built-in tools\n"
-      "  --thinking <level>             off, minimal, low, medium, high, xhigh, max\n"
+      "  --thinking <level>             0 off, 1 default/low, 2 medium, 3 high\n"
       "  --max-turns <n>                Stop after n model turns (0 = unlimited)\n"
       "  --compact-threshold <tokens>   Auto-compact above this estimate (0 = off)\n"
       "  --list-models                  Show providers and default models\n"

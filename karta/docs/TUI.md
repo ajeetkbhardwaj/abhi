@@ -7,13 +7,15 @@ the port instead of rediscovering it.
 ## Layout
 
 ```
-row 0            header: karta <version> · provider · model · cwd
-row 1            rule
-rows 2..n-4      transcript (wrapped, scrollable)
-row n-3          status (spinner + message)
-row n-2          rule
-row n-1          input line: prompt + editable text + cursor
+row 0              header: karta <version> · provider · model · cwd
+row 1              rule
+rows 2..n-5        transcript (wrapped, scrollable; mouse wheel over transcript only)
+row n-4            status/spinner (ready, thinking/generating, loading) + optional completion overlay above
+row n-3            rule
+row n-2            input: prompt + editable text + cursor
+row n-1            rule
 ```
+
 
 ## pi → karta component map
 
@@ -49,29 +51,34 @@ ncurses is single-threaded, so nothing else touches the screen:
 
 | Key | Action |
 |-----|--------|
-| `Enter` | submit the line |
-| `Esc` | cancel the running turn / in-flight fetch / current prompt phase |
+| `Enter` | submit the line (or select active completion) |
+| `Esc` | cancel running turn / in-flight fetch / current prompt phase; closes completion |
 | `Ctrl+C` | cancel a turn; at rest, quit |
-| `↑` / `↓` | command history |
+| `Ctrl+D` | quit at an empty idle prompt |
+| `Ctrl+L` | refresh/redraw screen |
+| `↑` / `↓` | command history; when completion is open, navigate suggestions |
+| `Tab` | cycle completion suggestions (when open) |
 | `←` / `→`, `Home` / `End` | cursor movement |
 | `Backspace` / `Delete` | edit (UTF-8 aware) |
 | `PageUp` / `PageDown` | scroll transcript |
+| mouse wheel | scroll transcript only (not over input/status) |
 
 ## Commands
 
 | Command | Behavior |
 |---------|----------|
-| `/login [provider]` | prompt for provider, then a masked API key; the key is **saved immediately** (never tested against the provider) and the model list is fetched |
-| `/logout [provider]` | forget the saved key (defaults to the current provider) |
-| `/model [id]` | fetch the provider catalog and show a numbered picker; `/model <id>` sets a model directly |
-| `/provider [name]` | show the provider, or start `/login` for another one |
+| `/login [provider]` | connect a provider; masked API key saved immediately (never test-called). Fetch does not block unrelated UI. |
+| `/logout [provider]` | forget the saved key (defaults to current provider) |
+| `/model [query]` | load models from **all logged-in/available providers** (saved auth + env/local) and open searchable selection. Type `/model <query>` to filter; `↑/↓/Tab` navigate, `Enter` applies `provider/model`. Direct: `/model <provider/model>` or `/model <id>`. |
+| `/provider [name]` | show or switch/start login for a provider |
+| `/thinking [0-3|off|low|medium|high]` | set thinking level (default `1`/low). `0` off, `1` default/low, `2` medium, `3` high. |
 | `/session` | print the session JSONL path |
 | `/clear` | clear the transcript |
 | `/help` | list commands |
 | `/exit` | quit (works from every prompt phase) |
 
 Commands are recognized before phase dispatch, so `/exit` can never be stored as
-a provider name, key, or model id.
+a provider name, key, or model id. Typing `/` opens slash-command autocomplete (filters as you type).
 
 ## Credentials
 

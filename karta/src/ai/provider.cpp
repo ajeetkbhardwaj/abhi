@@ -1,4 +1,4 @@
-#include "provider.h"
+#include "karta/ai/provider.h"
 
 #include <algorithm>
 #include <chrono>
@@ -8,10 +8,27 @@
 #include <sstream>
 #include <vector>
 
-#include "auth.h"
-#include "http.h"
+#include "karta/core/auth.h"
+#include "karta/ai/http.h"
 
 namespace karta {
+
+std::string normalize_thinking(const std::string& level) {
+  std::string v = level;
+  for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (v.empty() || v == "1" || v == "default" || v == "low" || v == "minimal") return "low";
+  if (v == "0" || v == "off" || v == "none" || v == "false") return "off";
+  if (v == "2" || v == "medium" || v == "med") return "medium";
+  if (v == "3" || v == "high" || v == "xhigh" || v == "max") return "high";
+  return "low";
+}
+std::string thinking_label(const std::string& level) {
+  const std::string v = normalize_thinking(level);
+  if (v == "off") return "off (0)";
+  if (v == "medium") return "medium (2)";
+  if (v == "high") return "high (3)";
+  return "default/low (1)";
+}
 namespace {
 
 long long now_millis() {
@@ -370,7 +387,8 @@ ModelSpec resolve_model_spec(const std::string& provider_arg, const std::string&
   const std::string env_max = env_or_empty("KARTA_MAX_TOKENS");
   if (!env_max.empty()) spec.max_tokens = std::atoi(env_max.c_str()) > 0 ? std::atoi(env_max.c_str()) : spec.max_tokens;
   const std::string env_thinking = env_or_empty("KARTA_THINKING");
-  if (spec.thinking == "off" && !env_thinking.empty()) spec.thinking = env_thinking;
+  if (!env_thinking.empty()) spec.thinking = normalize_thinking(env_thinking);
+  else spec.thinking = normalize_thinking(spec.thinking);
   return spec;
 }
 
@@ -404,8 +422,10 @@ AssistantTurn stream_openai(const ModelSpec& spec, const LlmRequest& request,
     options.set("include_usage", true);
     body.set("stream_options", options);
   }
-  if (spec.thinking != "off" && !spec.thinking.empty() && provider == "openai") {
-    body.set("reasoning_effort", spec.thinking == "xhigh" || spec.thinking == "max" ? "high" : spec.thinking);
+  const std::string tnorm = normalize_thinking(spec.thinking);
+  if (tnorm != "off") {
+    // OpenAI-compatible / providers that accept reasoning_effort
+    body.set("reasoning_effort", tnorm);
   }
 
   std::vector<std::string> headers = {"Content-Type: application/json",
@@ -415,6 +435,8 @@ AssistantTurn stream_openai(const ModelSpec& spec, const LlmRequest& request,
   std::map<int, ToolCall> partial_calls;
   bool saw_done = false;
   bool stream_failed = false;
+  bool reasoning_seen = false;
+  bool reasoning_closed = false;
   std::string stream_error;
 
   SseParser parser;
@@ -439,9 +461,19 @@ AssistantTurn stream_openai(const ModelSpec& spec, const LlmRequest& request,
     const Json& choice = chunk["choices"][0];
     if (!choice.is_object()) return;
     const Json& delta = choice["delta"];
+    // OpenAI-compatible reasoning/thinking deltas (kept visible so output isn't "missing")
+    std::string rpiece;
+    if (delta["reasoning_content"].is_string()) rpiece = delta["reasoning_content"].as_string();
+    else if (delta["reasoning"].is_string()) rpiece = delta["reasoning"].as_string();
+    else if (delta["thinking"].is_string()) rpiece = delta["thinking"].as_string();
+    if (!rpiece.empty()) {
+      if (!reasoning_seen) { reasoning_seen = true; const std::string m="\n[thinking]\n"; turn.text+=m; if(on_text) on_text(m); }
+      turn.text += rpiece; if (on_text) on_text(rpiece);
+    }
     if (delta["content"].is_string()) {
       const std::string piece = delta["content"].as_string();
       if (!piece.empty()) {
+        if (reasoning_seen && !reasoning_closed) { reasoning_closed = true; const std::string m="\n[/thinking]\n\n"; turn.text+=m; if(on_text) on_text(m); }
         turn.text += piece;
         if (on_text) on_text(piece);
       }
@@ -553,13 +585,17 @@ AssistantTurn stream_anthropic(const ModelSpec& spec, const LlmRequest& request,
     } else if (type == "content_block_delta") {
       const int index = static_cast<int>(event["index"].as_int(0));
       const Json& delta = event["delta"];
-      if (delta["type"].as_string() == "text_delta") {
+      const std::string dt = delta["type"].as_string();
+      if (dt == "text_delta") {
         const std::string piece = delta["text"].as_string();
         if (!piece.empty()) {
           turn.text += piece;
           if (on_text) on_text(piece);
         }
-      } else if (delta["type"].as_string() == "input_json_delta") {
+      } else if (dt == "thinking_delta") {
+        const std::string piece = delta["thinking"].as_string();
+        if (!piece.empty()) { turn.text += piece; if (on_text) on_text(piece); }
+      } else if (dt == "input_json_delta") {
         blocks[index].arguments += delta["partial_json"].as_string();
       }
     } else if (type == "message_delta") {

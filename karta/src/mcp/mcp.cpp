@@ -1,5 +1,5 @@
 // Karta — Model Context Protocol client (port of @earendil-works/pi-mcp).
-#include "mcp.h"
+#include "karta/mcp/mcp.h"
 
 #include <atomic>
 #include <chrono>
@@ -9,7 +9,7 @@
 #include <sstream>
 #include <thread>
 
-#include "platform.h"
+#include "karta/core/platform.h"
 
 #ifdef _WIN32
 #include <windows.h>

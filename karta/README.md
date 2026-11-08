@@ -1,48 +1,48 @@
 # Karta — Device-Agnostic C++17 Agent
 
-Karta is a faithful C++17 port of the pi agent core ("each and every features from typescript to the c/cpp"). Works on any device: Linux, macOS, Windows — no platform-specific dependencies.
+Karta is a C++17 port of the pi agent core (ncurses TUI + agent loop, tools, sessions, provider bridge). Designed to run on Linux, macOS, and Windows with minimal dependencies.
 
 ## Build
 
 ```bash
 cd karta
-cmake -S . -B build -DKARTA_BUILD_TUI=ON   # needs ncurses
-cmake --build build -j 4
+cmake -S . -B build -DKARTA_BUILD_TUI=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j4
 ```
 
-Binary: `karta/build/karta`
+- Binary: `karta/build/karta`
+- TUI build requires `ncurses`/`ncursesw` (`pkg-config ncursesw` preferred) + `libcurl`.
+- Launchers: `./run-tui.sh`, `../run-karta-tui.sh` (build if needed, run TUI).
+- Convenience command (workspace): `~/.local/bin/karta -> karta/build/karta` (`karta --version`).
 
-## Quick start
+## Run (pi-style)
 
 ```bash
-# JSON mode (events on stdout)
-KARTA_BASE_URL=http://127.0.0.1:8123/v1 ./karta/build/karta \
-  --provider nvidia --model nvidia/nemotron-3.5-lightning-30b-a3b \
-  --mode json -p "Use bash to list /tmp" --no-session
-
-# Text mode (REPL)
-./karta/build/karta --mode text -p "What's my OS?"
+karta                  # TTY + no prompt => terminal UI
+karta -p "hello"       # one-shot/print-style prompt
+karta --mode text
+karta --mode json -p "Use bash to list /tmp"
+karta --mode rpc       # JSONL control
 ```
 
 ## Terminal UI
 
-```bash
-./karta/build/karta
-```
+When attached to a TTY with no prompt, Karta opens the ncurses TUI.
 
-With no prompt (and a TTY) karta opens the ncurses UI. From there:
+**Commands**
+- `/login [provider]` — connect a provider; API key input is masked and saved immediately (never test-called at login). Saved to `$HOME/.karta/auth.json` (dir `0700`, file `0600`, atomic write). `/logout [provider]` removes it.
+- `/model` — loads models from **all logged-in/available providers** (saved auth + env/local) and opens searchable selection. Type `/model <query>` to filter; navigate with `↑/↓` or `Tab`, `Enter` to select/apply (`provider/model`). Direct set: `/model <provider/model>` or `/model <id>`.
+- `/provider [name]`, `/thinking [0|1|2|3|off|low|medium|high]` (default 1/low), `/session`, `/clear`, `/help`, `/exit`.
 
-```
-/login            # pick a provider, paste its API key (masked, saved)
-/model            # list that provider's models and pick one
-/exit
-```
+**Keys / behavior**
+- `Enter` submit, `Esc` cancel running turn/fetch/phase, `Ctrl+C` cancel or quit at rest, `Ctrl+D` quit at empty idle prompt, `Ctrl+L` refresh.
+- Slash-command autocomplete: typing `/` shows commands; `↑/↓/Tab` navigate, `Enter` select, `Esc` close (filters as you type).
+- Mouse wheel scrolls the **transcript** area (not the input). `PgUp/PgDn` scroll transcript.
+- Input is framed by horizontal rules above and below; status/spinner (thinking/generating) shows just above input.
+- Assistant output streams live; reasoning/thinking deltas are shown when provided (`[thinking]…[/thinking]`) and controlled by thinking level. Tool output is rendered in the transcript (scrollable).
+- UTF-8/wide-char rendering via ncursesw + locale.
 
-The key is stored in `$HOME/.karta/auth.json` (0600, directory 0700, atomic
-write) so the next launch is already connected. `/logout` removes it. Keys are
-never printed or sent anywhere at login time. See `karta/docs/TUI.md`.
-
-Pipes and `-p` still use the plain text/JSON/RPC modes.
+Details and pi-component mapping: `docs/TUI.md`. Pipes and `-p` still use `--mode text|json|rpc`.
 
 ## Supported providers
 

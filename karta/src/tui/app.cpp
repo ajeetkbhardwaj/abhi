@@ -1,4 +1,4 @@
-#include "tui/app.h"
+#include "karta/tui/app.h"
 
 #include <algorithm>
 #include <atomic>
@@ -14,12 +14,12 @@
 #include <utility>
 #include <vector>
 
-#include "auth.h"
-#include "json.h"
-#include "provider.h"
-#include "session.h"
-#include "tui/model-picker.h"
-#include "tui/screen.h"
+#include "karta/core/auth.h"
+#include "karta/core/json.h"
+#include "karta/ai/provider.h"
+#include "karta/session/session.h"
+#include "karta/tui/model-picker.h"
+#include "karta/tui/screen.h"
 
 namespace karta {
 namespace {
@@ -47,6 +47,10 @@ bool all_digits(const std::string& value) {
   return true;
 }
 
+std::string name_or(const AgentEvent& event) {
+  const std::string n = event.payload["toolName"].as_string();
+  return n.empty() ? "tool" : n;
+}
 std::string first_line(const std::string& text, std::size_t limit) {
   const std::size_t newline = text.find('\n');
   std::string line = newline == std::string::npos ? text : text.substr(0, newline);
@@ -74,6 +78,8 @@ class TuiApp {
     job_cancel_ = true;
     if (worker_.joinable()) worker_.join();
     if (job_thread_.joinable()) job_thread_.join();
+    models_all_done_ = true;
+    if (models_all_thread_.joinable()) models_all_thread_.join();
     model_picker_.cancel_fetch();
     ui_.stop();
   }
@@ -135,7 +141,28 @@ class TuiApp {
   std::vector<std::string> job_models_;
 
   std::string pending_provider_;
-  std::vector<std::string> models_;
+  std::vector<std::string> models_; // legacy/current-provider list
+  std::vector<std::pair<std::string,std::string>> all_models_; // (provider, model) from all connected providers
+  bool models_loading_all_ = false;
+  std::atomic<bool> models_all_done_{false};
+  std::thread models_all_thread_;
+  std::mutex models_all_mutex_;
+  std::string models_all_error_;
+  std::vector<std::pair<std::string,std::string>> models_all_result_;
+  bool consume_models_all();
+  void begin_all_model_pick();
+
+  // Inline completion (slash commands / model search)
+  bool completion_active_ = false;
+  enum class CompletionKind { None, Command, Model } completion_kind_ = CompletionKind::None;
+  std::vector<std::pair<std::string,std::string>> completion_all_; // value,label/desc
+  std::vector<int> completion_filtered_;
+  int completion_index_ = 0;
+  std::string completion_prefix_;
+  void update_completion();
+  void render_completion();
+  void clear_completion();
+  void apply_completion(bool submit);
 };
 
 int TuiApp::run() {
@@ -167,16 +194,21 @@ int TuiApp::run() {
   while (running_) {
     bool changed = consume_events();
     changed = consume_job() || changed;
+    changed = consume_models_all() || changed;
 
     int ch = 0;
     const tui::Key key = ui_.poll(&ch);
     if (key != tui::Key::None) {
+      const std::string before = ui_.input();
       handle_key(key, ch);
+      if (ui_.input() != before || key == tui::Key::Backspace || key == tui::Key::Delete || key == tui::Key::Char) update_completion();
       changed = true;
     }
 
-    if (changed) {
+    const bool active = busy_ || job_running_ || models_loading_all_ || ui_.streaming();
+    if (changed || active) {
       ui_.draw();
+      if (!changed) std::this_thread::sleep_for(std::chrono::milliseconds(80));
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -213,10 +245,27 @@ void TuiApp::reset_prompt() {
 }
 
 void TuiApp::handle_key(tui::Key key, int /*ch*/) {
+  if (key == tui::Key::CtrlL) { ui_.draw(); return; }
+  if (key == tui::Key::CtrlD) {
+    if (ui_.input().empty() && !busy_ && !job_running_ && phase_ == Phase::Chat) { running_ = false; return; }
+  }
+  if (completion_active_) {
+    if (key == tui::Key::Escape) { clear_completion(); return; }
+    if (key == tui::Key::Up) {
+      if (!completion_filtered_.empty()) completion_index_ = (completion_index_ <= 0) ? (int)completion_filtered_.size()-1 : completion_index_-1;
+      render_completion(); return;
+    }
+    if (key == tui::Key::Down || key == tui::Key::Tab) {
+      if (!completion_filtered_.empty()) completion_index_ = (completion_index_ + 1) % (int)completion_filtered_.size();
+      render_completion(); return;
+    }
+    if (key == tui::Key::Enter) { apply_completion(true); return; }
+  }
   switch (key) {
     case tui::Key::Enter: {
       const std::string line = ui_.input();
       ui_.set_input("");
+      clear_completion();
       handle_submit(line);
       return;
     }
@@ -225,8 +274,7 @@ void TuiApp::handle_key(tui::Key key, int /*ch*/) {
       if (busy_ && agent_) {
         agent_->interrupt();
         ui_.set_status("cancelling…", true);
-      } else if (job_running_) {
-        // A model fetch in flight: abort the HTTP transfer.
+      } else if (job_running_ || models_loading_all_) {
         job_cancel_ = true;
         ui_.set_status("cancelling…", true);
       } else if (phase_ != Phase::Chat) {
@@ -263,10 +311,7 @@ void TuiApp::handle_submit(const std::string& line) {
     finish_model_pick(line);
     return;
   }
-  if (job_running_) {
-    say("still fetching models — Esc cancels", tui::Style::Dim);
-    return;
-  }
+  if (job_running_ && !models_loading_all_) { say("still fetching — Esc cancels", tui::Style::Dim); return; }
   start_prompt(line);
 }
 
@@ -291,9 +336,23 @@ void TuiApp::handle_command(const std::string& line) {
     say("  /logout [provider]  forget the saved key for a provider", tui::Style::Normal);
     say("  /model [id]         list and pick a model (or set one directly)", tui::Style::Normal);
     say("  /provider [name]    show or switch the provider", tui::Style::Normal);
+    say("  /thinking [0-3|off|low|medium|high]  set thinking level (default 1)", tui::Style::Normal);
     say("  /session            show the session file", tui::Style::Normal);
     say("  /clear              clear the transcript", tui::Style::Normal);
-    say("  /exit               quit (Esc cancels a running turn)", tui::Style::Normal);
+    say("  /exit               quit (Esc cancels a turn, Ctrl+D at empty prompt)", tui::Style::Normal);
+    say("  Ctrl+L              refresh screen", tui::Style::Normal);
+    return;
+  }
+  if (name == "thinking" || name == "think") {
+    if (argument.empty()) {
+      say("thinking: " + thinking_label(options_.agent.model.thinking), tui::Style::Normal);
+      say("  0 off, 1 default/low, 2 medium, 3 high", tui::Style::Dim);
+      return;
+    }
+    options_.agent.model.thinking = normalize_thinking(argument);
+    if (agent_) agent_->set_model(options_.agent.model);
+    sync_header();
+    say("thinking → " + thinking_label(options_.agent.model.thinking), tui::Style::Accent);
     return;
   }
   if (name == "login") {
@@ -301,24 +360,23 @@ void TuiApp::handle_command(const std::string& line) {
     return;
   }
   if (name == "model" || name == "models") {
+    // /model <provider/model or id> sets directly (back-compat). /model <number> uses current list.
+    // Bare /model opens unified search across all logged-in providers.
     if (!argument.empty()) {
-      const ModelSpec& current = options_.agent.model;
-      if (!provider_is_local(current.provider) && current.api_key.empty()) {
-        say("not logged in to " + current.provider + " — use /login first", tui::Style::Error);
-        return;
+      if (all_digits(argument) && !models_.empty()) { finish_model_pick(argument); return; }
+      if (argument.find('/') != std::string::npos) {
+        // provider/model
+        const size_t sl = argument.find('/');
+        std::string prov = argument.substr(0, sl), mod = argument.substr(sl+1);
+        if (!prov.empty() && !mod.empty()) { apply_spec(spec_for(prov, mod)); say("model → "+prov+"/"+mod, tui::Style::Accent); return; }
       }
-      if (all_digits(argument)) {
-        if (models_.empty()) {
-          say("run /model first to load the model list", tui::Style::Dim);
-          return;
-        }
-        finish_model_pick(argument);
-        return;
-      }
-      apply_model(argument);
+      // treat as search: open unified picker seeded with query
+      ui_.set_input("/model " + argument);
+      begin_all_model_pick();
+      update_completion();
       return;
     }
-    begin_model_pick();
+    begin_all_model_pick();
     return;
   }
   if (name == "provider") {
@@ -344,6 +402,7 @@ void TuiApp::handle_command(const std::string& line) {
         say("an environment variable still provides a key for " + provider, tui::Style::Dim);
       }
     }
+    all_models_.clear();
     say(removed ? "logged out of " + provider + " — saved key removed"
                 : "no saved key for " + provider,
         removed ? tui::Style::Success : tui::Style::Dim);
@@ -439,6 +498,7 @@ void TuiApp::finish_login_key(const std::string& raw) {
 
   if (save_auth_key(provider, key)) {
     say("saved " + provider + " key to " + auth_file_path(), tui::Style::Success);
+  all_models_.clear();
     say("reused on every launch until you run /logout", tui::Style::Dim);
   } else {
     say("warning: could not save the key to " + auth_file_path() +
@@ -450,10 +510,6 @@ void TuiApp::finish_login_key(const std::string& raw) {
 }
 
 void TuiApp::begin_model_pick() {
-  if (job_running_) {
-    say("a request is already running", tui::Style::Dim);
-    return;
-  }
   const ModelSpec& current = options_.agent.model;
   if (!provider_is_local(current.provider) && current.api_key.empty()) {
     say("not logged in to " + current.provider + " — use /login first", tui::Style::Error);
@@ -548,7 +604,7 @@ void TuiApp::start_prompt(const std::string& text) {
   if (!agent_) return;
 
   say("› " + text, tui::Style::User);
-  ui_.set_status("thinking…", true);
+  ui_.set_status(std::string("thinking (") + thinking_label(options_.agent.model.thinking) + ")…", true);
   busy_ = true;
   worker_done_ = false;
   {
@@ -574,31 +630,76 @@ bool TuiApp::consume_events() {
 
   for (const AgentEvent& event : events) {
     changed = true;
-    if (event.type == "message_update") {
+    if (event.type == "message_start") {
+      const std::string role = event.payload["role"].as_string();
+      if (role == "assistant") {
+        if (!ui_.streaming()) ui_.stream_begin(tui::Style::Assistant);
+        if (!completion_active_) ui_.set_status(std::string("thinking (") + thinking_label(options_.agent.model.thinking) + ")…", true);
+      }
+    } else if (event.type == "message_update") {
       const std::string delta = event.payload["delta"].as_string();
-      if (!delta.empty()) ui_.stream_delta(delta);
+      if (!delta.empty()) {
+        if (!ui_.streaming()) ui_.stream_begin(tui::Style::Assistant);
+        ui_.stream_delta(delta);
+        // keep rotating indicator just above input while generating
+        if (!completion_active_) ui_.set_status("generating…", true);
+      }
     } else if (event.type == "message_end") {
-      if (ui_.streaming()) ui_.stream_end();
       if (options_.session) options_.session->append_message(event.payload);
+      const std::string role = event.payload["role"].as_string();
+      if (role == "assistant") {
+        if (ui_.streaming()) {
+          ui_.stream_end();
+        } else {
+          // Fallback: if streaming deltas were missed, render final text.
+          std::string text;
+          if (event.payload["content"].is_string()) {
+            text = event.payload["content"].as_string();
+          } else if (event.payload["content"].is_array()) {
+            for (const Json& part : event.payload["content"].items()) {
+              if (part["type"].as_string() == "text") text += part["text"].as_string();
+            }
+          } else if (event.payload["text"].is_string()) {
+            text = event.payload["text"].as_string();
+          }
+          if (!text.empty()) {
+            say("• " + std::string(""), tui::Style::Dim);
+            ui_.append_text(text, tui::Style::Assistant);
+            ui_.append_text("", tui::Style::Normal);
+          }
+        }
+      }
     } else if (event.type == "tool_execution_start") {
       if (ui_.streaming()) ui_.stream_end();
       const std::string name = event.payload["toolName"].as_string();
       const std::string args = event.payload["arguments"].dump();
-      say("● " + name + " " + first_line(args, 100), tui::Style::Accent);
+      say("● " + name, tui::Style::Accent);
+      // show a short args preview (wrapped) instead of one truncated line
+      const std::string preview = first_line(args, 220);
+      if (!preview.empty()) say("  args: " + preview, tui::Style::Dim);
     } else if (event.type == "tool_execution_end") {
+      if (ui_.streaming()) ui_.stream_end();
       const bool is_error = event.payload["isError"].as_bool(false);
       const std::string result = event.payload["result"].as_string();
-      say(std::string(is_error ? "  ✗ " : "  ✓ ") + first_line(result, 120),
-          is_error ? tui::Style::Error : tui::Style::Success);
+      say(std::string(is_error ? "  ✗ " : "  ✓ ") + name_or(event), is_error ? tui::Style::Error : tui::Style::Success);
+      if (!result.empty()) {
+        // Render full result as wrapped transcript lines (no "..." truncation).
+        // Large outputs remain scrollable (PgUp/PgDn) instead of hidden.
+        ui_.append_text(result, is_error ? tui::Style::Error : tui::Style::Normal);
+        ui_.append_text("", tui::Style::Normal);
+      }
     } else if (event.type == "error") {
+      if (ui_.streaming()) ui_.stream_end();
       say("error: " + event.payload["message"].as_string(), tui::Style::Error);
     } else if (event.type == "compaction") {
+      if (ui_.streaming()) ui_.stream_end();
       if (options_.session) {
         options_.session->append_compaction(event.payload["summary"].as_string(),
                                             event.payload["tokensBefore"].as_int(0));
       }
       say("[conversation compacted]", tui::Style::Dim);
     } else if (event.type == "compaction_failed") {
+      if (ui_.streaming()) ui_.stream_end();
       say("[compaction failed: " + event.payload["message"].as_string() + "]", tui::Style::Dim);
     }
   }
@@ -691,6 +792,168 @@ bool TuiApp::consume_job() {
 int run_tui_app(TuiAppOptions options) {
   TuiApp app(std::move(options));
   return app.run();
+}
+
+
+namespace {
+bool contains_ic(const std::string& hay, const std::string& needle) {
+  if (needle.empty()) return true;
+  auto it = std::search(hay.begin(), hay.end(), needle.begin(), needle.end(),
+    [](char a,char b){ return std::tolower((unsigned char)a)==std::tolower((unsigned char)b); });
+  return it != hay.end();
+}
+}
+
+void TuiApp::clear_completion() {
+  completion_active_ = false;
+  completion_kind_ = CompletionKind::None;
+  completion_filtered_.clear();
+  completion_index_ = 0;
+  ui_.clear_overlay();
+  ui_.set_status(kReadyStatus, false);
+}
+
+void TuiApp::update_completion() {
+  if (phase_ != Phase::Chat || busy_ || job_running_) { clear_completion(); return; }
+  const std::string in = ui_.input();
+  completion_all_.clear();
+  completion_filtered_.clear();
+  completion_kind_ = CompletionKind::None;
+
+  if (in.size() >= 1 && in[0] == '/' && in.find(' ') == std::string::npos) {
+    completion_kind_ = CompletionKind::Command;
+    completion_prefix_ = lower(in.substr(1));
+    const std::vector<std::pair<std::string,std::string>> cmds = {
+      {"login","connect provider/key"},{"logout","forget saved key"},{"model","pick or set model"},
+      {"provider","show/switch provider"},{"thinking","0 off,1 default,2 medium,3 high"},
+      {"session","show session file"},{"clear","clear transcript"},{"help","show commands"},{"exit","quit"}};
+    for (auto& c: cmds) if (contains_ic(c.first, completion_prefix_)) {
+      completion_filtered_.push_back((int)completion_all_.size()); completion_all_.push_back(c);
+    }
+  } else if ((in.rfind("/model ",0)==0) || (in.rfind("/models ",0)==0) || lower(trim(in))=="/model" || lower(trim(in))=="/models") {
+    const size_t sp = in.find(' ');
+    completion_prefix_ = (sp==std::string::npos)?"":in.substr(sp+1);
+    if (all_models_.empty() && !models_.empty()) {
+      // seed from current provider list
+      for (auto& m: models_) all_models_.push_back({options_.agent.model.provider,m});
+    }
+    if (all_models_.empty() && !models_loading_all_) { begin_all_model_pick(); return; }
+    if (!all_models_.empty()) {
+      completion_kind_ = CompletionKind::Model;
+      for (auto& pm: all_models_) {
+        std::string show = pm.first + "/" + pm.second;
+        if (contains_ic(show, completion_prefix_) || contains_ic(pm.second, completion_prefix_)) {
+          completion_filtered_.push_back((int)completion_all_.size()); completion_all_.push_back({pm.first, pm.second}); // value=model, label stored in desc? reuse pair (provider,model)
+        }
+      }
+    }
+  }
+
+  completion_active_ = !completion_filtered_.empty();
+  if (!completion_active_) { if (completion_kind_==CompletionKind::None) { ui_.clear_overlay(); ui_.set_status(kReadyStatus, false);} return; }
+  if (completion_index_ >= (int)completion_filtered_.size()) completion_index_ = 0;
+  render_completion();
+}
+
+void TuiApp::render_completion() {
+  if (!completion_active_ || completion_filtered_.empty()) { ui_.clear_overlay(); return; }
+  std::vector<std::string> lines;
+  int total = (int)completion_filtered_.size();
+  int maxn = 8; int start = 0;
+  if (completion_index_ >= maxn) start = completion_index_ - maxn + 1;
+  int end = std::min(total, start + maxn);
+  for (int i=start;i<end;i++) {
+    const auto& it = completion_all_[completion_filtered_[i]];
+    std::string label = (completion_kind_==CompletionKind::Command) ? ("/"+it.first+"  — "+it.second) : (it.first + "/" + it.second);
+    if (label.size() > (size_t)(ui_.cols()>8?ui_.cols()-8:40)) label = label.substr(0, ui_.cols()>11?ui_.cols()-11:37) + "…";
+    lines.push_back(label);
+  }
+  if (total > maxn) lines.insert(lines.begin(), "… " + std::to_string(completion_index_+1) + "/" + std::to_string(total) + (completion_kind_==CompletionKind::Model?" (type to search)":""));
+  ui_.set_overlay(lines, completion_index_ - start + ((total>maxn)?1:0));
+  std::string hint = (completion_kind_==CompletionKind::Command?"commands":"models") + std::string(": ↑↓/Tab navigate · Enter select · Esc close");
+  ui_.set_status(hint, false);
+}
+
+void TuiApp::apply_completion(bool submit) {
+  if (!completion_active_ || completion_filtered_.empty()) return;
+  const auto& item = completion_all_[completion_filtered_[completion_index_]];
+  if (completion_kind_ == CompletionKind::Command) {
+    ui_.set_input("/" + item.first + (item.first=="exit"||item.first=="help"||item.first=="clear"||item.first=="session"?"":" "));
+  } else {
+    // item.first=provider, item.second=model
+    std::string prov=item.first, mod=item.second;
+    ui_.set_input("/model " + prov + "/" + mod);
+    if (submit) {
+      ui_.set_input(""); clear_completion();
+      apply_spec(spec_for(prov, mod)); say("model → "+prov+"/"+mod, tui::Style::Accent); ui_.set_status(kReadyStatus,false); return;
+    }
+  }
+  if (submit) {
+    const std::string line = ui_.input();
+    ui_.set_input("");
+    clear_completion();
+    handle_submit(line);
+  } else {
+    update_completion();
+  }
+}
+
+
+
+void TuiApp::begin_all_model_pick() {
+  if (!all_models_.empty()) {
+    clear_completion();
+    ui_.set_prompt("model> ");
+    ui_.set_input("/model ");
+    update_completion();
+    ui_.set_status("search models (all logged-in providers) · ↑↓/Tab · Enter · Esc", false);
+    return;
+  }
+  if (models_loading_all_ || job_running_) { say("already loading models — wait or Esc cancels", tui::Style::Dim); return; }
+  std::vector<std::string> provs = known_providers();
+  std::map<std::string,bool> seen; std::vector<std::string> targets;
+  auto addp=[&](const std::string& p){ std::string lp=lower(p); if(lp.empty()||seen[lp]) return; seen[lp]=true; targets.push_back(lp); };
+  for (auto& kv : load_auth()) addp(kv.first);
+  for (auto& p : provs) { if (provider_is_local(p) || !stored_api_key(p).empty()) { addp(p); } else { ModelSpec s=resolve_model_spec(p,"",""); if(!s.api_key.empty()) addp(p); } }
+  addp(options_.agent.model.provider);
+  if (targets.empty()) { say("no providers connected — use /login first", tui::Style::Error); return; }
+  models_loading_all_ = true; models_all_done_ = false;
+  { std::lock_guard<std::mutex> lk(models_all_mutex_); models_all_error_.clear(); models_all_result_.clear(); }
+  ui_.set_status("loading models from " + std::to_string(targets.size()) + " provider(s)… (Esc cancels)", true);
+  if (models_all_thread_.joinable()) models_all_thread_.join();
+  job_cancel_ = false;
+  models_all_thread_ = std::thread([this, targets]() {
+    std::vector<std::pair<std::string,std::string>> out; std::string first_err;
+    for (auto& p : targets) {
+      if (job_cancel_.load()) break;
+      ModelSpec spec = resolve_model_spec(p, "", "");
+      std::string err; auto ms = fetch_models(spec, &err, &job_cancel_);
+      if (!err.empty() && first_err.empty()) first_err = p + ": " + err;
+      for (auto& m : ms) out.push_back({p,m});
+    }
+    std::sort(out.begin(), out.end()); out.erase(std::unique(out.begin(), out.end()), out.end());
+    { std::lock_guard<std::mutex> lk(models_all_mutex_); models_all_result_ = std::move(out); models_all_error_ = first_err; }
+    models_all_done_ = true;
+  });
+}
+
+bool TuiApp::consume_models_all() {
+  if (!models_all_done_.load()) return false;
+  models_all_done_ = false; models_loading_all_ = false;
+  if (models_all_thread_.joinable()) models_all_thread_.join();
+  std::vector<std::pair<std::string,std::string>> res; std::string err;
+  { std::lock_guard<std::mutex> lk(models_all_mutex_); res = models_all_result_; err = models_all_error_; }
+  all_models_ = std::move(res);
+  if (all_models_.empty()) {
+    ui_.set_status(kReadyStatus, false);
+    say("no models loaded" + (err.empty()?"":(" — "+err)), tui::Style::Error);
+    say("use /model <provider/model> to set directly, or /login", tui::Style::Dim);
+    return true;
+  }
+  say("Loaded " + std::to_string(all_models_.size()) + " models (all logged-in providers). Type to search, ↑↓/Tab, Enter.", tui::Style::Success);
+  ui_.set_input("/model ");
+  update_completion();
+  return true;
 }
 
 }  // namespace karta

@@ -5,7 +5,7 @@
 #include <vector>
 #include <functional>
 
-#include "tui/screen.h"
+#include "karta/tui/screen.h"
 
 namespace karta::tui {
 

@@ -15,13 +15,13 @@
 #include <unordered_map>
 #include <vector>
 
-#include "auth.h"
-#include "json.h"
-#include "provider.h"
-#include "session.h"
-#include "tui/app.h"
-#include "tui/screen.h"
-#include "tui/select-list.h"
+#include "karta/core/auth.h"
+#include "karta/core/json.h"
+#include "karta/ai/provider.h"
+#include "karta/session/session.h"
+#include "karta/tui/app.h"
+#include "karta/tui/screen.h"
+#include "karta/tui/select-list.h"
 
 namespace karta {
 

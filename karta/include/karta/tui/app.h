@@ -3,7 +3,7 @@
 
 #include <string>
 
-#include "agent.h"
+#include "karta/agent/agent.h"
 
 namespace karta {
 

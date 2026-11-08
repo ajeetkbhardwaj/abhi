@@ -1,4 +1,4 @@
-#include "tools.h"
+#include "karta/tools/tools.h"
 
 #include <algorithm>
 #include <cctype>
@@ -12,7 +12,7 @@
 #include <sstream>
 #include <system_error>
 
-#include "platform.h"
+#include "karta/core/platform.h"
 
 namespace fs = std::filesystem;
 

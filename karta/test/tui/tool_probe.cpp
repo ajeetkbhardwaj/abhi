@@ -2,8 +2,8 @@
 // Build: g++ -std=c++17 -I src test/tool_probe.cpp src/tools.cpp src/platform.cpp src/json.cpp -lcurl -pthread
 #include <iostream>
 
-#include "json.h"
-#include "tools.h"
+#include "karta/core/json.h"
+#include "karta/tools/tools.h"
 
 int main(int argc, char** argv) {
   if (argc < 4) {

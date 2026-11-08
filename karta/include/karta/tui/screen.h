@@ -17,6 +17,7 @@ enum class Style {
   Bold,
   Accent,
   User,
+  Assistant,
   Success,
   Error,
   Status,
@@ -38,7 +39,10 @@ enum class Key {
   PageDown,
   Escape,
   CtrlC,
+  CtrlD,
+  CtrlL,
   Tab,
+  Mouse,
   Resize,
 };
 
@@ -84,6 +88,8 @@ class Tui {
   bool streaming() const { return streaming_; }
 
   void clear_transcript();
+  void set_overlay(const std::vector<std::string>& lines, int selected=-1);
+  void clear_overlay();
 
   void set_prompt(const std::string& label);
   const std::string& input() const { return input_; }
@@ -104,6 +110,9 @@ class Tui {
   size_t text_width() const;
   size_t visible_rows() const;
   void trim_transcript();
+  void scroll_up(std::size_t n=0);
+  void scroll_down(std::size_t n=0);
+  bool in_transcript(int row) const;
 
   bool running_ = false;
   size_t rows_ = 24;
@@ -132,6 +141,8 @@ class Tui {
   std::string history_draft_;
 
   bool colors_ = false;
+  std::vector<std::string> overlay_lines_;
+  int overlay_selected_ = -1;
 };
 
 }  // namespace karta::tui

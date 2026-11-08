@@ -1,5 +1,5 @@
-#include "cli.h"
-#include "platform.h"
+#include "karta/cli/cli.h"
+#include "karta/core/platform.h"
 
 int main(int argc, char** argv) {
   karta::enable_utf8_console();

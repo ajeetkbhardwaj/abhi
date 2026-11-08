@@ -1,4 +1,4 @@
-#include "platform.h"
+#include "karta/core/platform.h"
 
 #include <chrono>
 #include <cstdio>
