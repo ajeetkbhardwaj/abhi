@@ -39,8 +39,8 @@ std::string sanitize(const std::string& value) {
 
 Json session_header(const std::string& id, const std::string& cwd, const std::string& name) {
   Json header = Json::object();
-  header.set("type", "session");
-  header.set("version", 3);
+  header.set("type", "header");
+  header.set("version", 4);
   header.set("id", id);
   header.set("timestamp", iso8601_now());
   header.set("cwd", cwd);
@@ -94,15 +94,18 @@ std::string Session::directory_for_cwd(const std::string& cwd, const std::string
 }
 
 std::unique_ptr<Session> Session::create(const std::string& cwd, const std::string& directory,
-                                         const std::string& name, std::string* error,
-                                         const std::string& explicit_id,
-                                         const std::string& parent_session) {
+                                          const std::string& name, std::string* error,
+                                          const std::string& explicit_id,
+                                          const std::string& parent_session) {
   std::error_code fs_error;
   fs::create_directories(directory, fs_error);
   if (fs_error) {
     if (error) *error = "cannot create session directory: " + directory;
     return nullptr;
   }
+
+  // Secure directory permissions: 0700
+  fs::permissions(directory, fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec, fs_error);
 
   auto session = std::unique_ptr<Session>(new Session());
   session->record_.id = explicit_id.empty() ? karta::Id::session_id() : explicit_id;
@@ -138,7 +141,7 @@ std::unique_ptr<Session> Session::load(const std::string& path, std::string* err
     const Json entry = Json::parse(line, &parse_error);
     if (!parse_error.empty()) continue;
 
-    if (entry["type"].as_string() == "session" && !header_seen) {
+    if ((entry["type"].as_string() == "session" || entry["type"].as_string() == "header") && !header_seen) {
       header_seen = true;
       session->record_.id = entry["id"].as_string();
       session->record_.cwd = entry["cwd"].as_string();
@@ -224,10 +227,44 @@ void Session::append_entry(Json entry) {
   else entry.set("parentId", Json());
   entry.set("timestamp", iso8601_now());
 
-  std::ofstream stream(record_.path, std::ios::binary | std::ios::app);
+  // Atomic write: write to temp file then rename
+  std::string tmp_path = record_.path + ".tmp";
+  std::ofstream stream(tmp_path, std::ios::binary | std::ios::trunc);
   if (!stream) return;
+
+  // Read existing content
+  std::ifstream read_stream(record_.path, std::ios::binary);
+  std::string line;
+  if (read_stream) {
+    while (std::getline(read_stream, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      if (!line.empty()) {
+        stream << line << "\n";
+      }
+    }
+  }
+
+  // Append new entry
   stream << entry.dump() << "\n";
   stream.flush();
+  stream.close();
+
+  // Rename temp file to actual file (atomic on POSIX)
+  std::error_code ec;
+  fs::rename(tmp_path, record_.path, ec);
+  if (ec) {
+    // Fallback: remove temp, try direct append
+    fs::remove(tmp_path, ec);
+    std::ofstream fallback(record_.path, std::ios::binary | std::ios::app);
+    if (fallback) {
+      fallback << entry.dump() << "\n";
+      fallback.flush();
+    }
+  }
+
+  // Secure permissions: 0600 for file
+  fs::permissions(record_.path, fs::perms::owner_read | fs::perms::owner_write, ec);
+
   set_parent(entry);
 }
 

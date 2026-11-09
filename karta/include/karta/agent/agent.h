@@ -21,6 +21,10 @@ struct AgentOptions {
   std::string cwd;
   int max_turns = 0;             // 0 = unlimited
   long long compact_threshold = 0;  // estimated tokens; 0 disables auto-compaction
+
+  // Hook functions for tool call interception
+  std::function<void(const std::string& tool_name, const Json& arguments)> before_tool_call;
+  std::function<void(const std::string& tool_name, const Json& arguments, const Json& result)> after_tool_call;
 };
 
 struct AgentEvent {

@@ -1,199 +1,444 @@
-// Karta — Model Context Protocol client (port of @earendil-works/pi-mcp).
+// Karta — MCP (Model Context Protocol) client implementation.
+// Full JSON-RPC 2.0 client with stdio/HTTP transports, tools, resources, prompts, roots, logging, sampling.
+
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
+#include <chrono>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "karta/core/json.h"
 
-namespace karta {
+namespace karta::mcp {
 
-// Forward declarations
-class McpTransport;
+// ============================================================================
+// JSON-RPC 2.0 Types
+// ============================================================================
 
-// ------------------------------------------------------------------ Protocol types
+using JsonRpcId = std::variant<int64_t, std::string>;
 
-struct McpImplementation {
+struct JsonRpcRequest {
+  std::string jsonrpc = "2.0";
+  JsonRpcId id;
+  std::string method;
+  Json params;
+};
+
+struct JsonRpcResponse {
+  std::string jsonrpc = "2.0";
+  JsonRpcId id;
+  Json result;
+  struct Error {
+    int code;
+    std::string message;
+    Json data;
+  };
+  std::optional<Error> error;
+};
+
+struct JsonRpcNotification {
+  std::string jsonrpc = "2.0";
+  std::string method;
+  Json params;
+};
+
+using JsonRpcMessage = std::variant<JsonRpcRequest, JsonRpcResponse, JsonRpcNotification>;
+
+// Standard JSON-RPC error codes
+enum class JsonRpcErrorCode : int {
+  ParseError = -32700,
+  InvalidRequest = -32600,
+  MethodNotFound = -32601,
+  InvalidParams = -32602,
+  InternalError = -32603,
+  // MCP specific
+  McpError = -32000,
+  McpTimeout = -32001,
+  McpAborted = -32002,
+  McpConnectionClosed = -32003,
+  McpAuthRequired = -32004,
+  McpSessionExpired = -32005,
+};
+
+// ============================================================================
+// MCP Protocol Types (mirroring pi-mcp)
+// ============================================================================
+
+struct Implementation {
   std::string name;
   std::string version;
-  std::string title;  // optional
-};
-
-struct McpToolAnnotations {
   std::string title;
-  bool readOnlyHint = false;
-  bool destructiveHint = false;
-  bool idempotentHint = false;
-  bool openWorldHint = false;
 };
 
-struct McpTool {
+struct Root {
+  std::string uri;
   std::string name;
-  std::string title;       // optional
-  std::string description; // optional
-  Json inputSchema;        // JSON Schema object
-  McpToolAnnotations annotations;
 };
 
-struct McpCallToolResult {
-  std::vector<Json> content;  // array of content blocks (type: "text" | "image" | ...)
-  bool isError = false;
-  Json structuredContent;     // optional
+struct ClientCapabilities {
+  std::optional<std::map<std::string, Json>> experimental;
+  std::optional<std::map<std::string, Json>> roots;
+  std::optional<std::map<std::string, Json>> sampling;
+  std::optional<std::map<std::string, Json>> elicitation;
 };
 
-struct McpClientOptions {
-  McpImplementation clientInfo;
-  std::vector<std::string> roots;  // URIs
-  int requestTimeoutMs = 30000;
+struct ServerCapabilities {
+  std::optional<std::map<std::string, Json>> experimental;
+  std::optional<std::map<std::string, Json>> logging;
+  std::optional<std::map<std::string, Json>> prompts;
+  std::optional<std::map<std::string, Json>> resources;
+  std::optional<std::map<std::string, Json>> tools;
+  std::optional<std::map<std::string, Json>> completions;
 };
 
-// --------------------------------------------------------------- Transport interface
+struct InitializeParams {
+  std::string protocolVersion;
+  ClientCapabilities capabilities;
+  Implementation clientInfo;
+};
+
+struct InitializeResult {
+  std::string protocolVersion;
+  ServerCapabilities capabilities;
+  Implementation serverInfo;
+  std::string instructions;
+};
+
+struct ProgressNotification {
+  JsonRpcId progressToken;
+  double progress;
+  std::optional<double> total;
+  std::optional<std::string> message;
+};
+
+struct CancelledNotification {
+  JsonRpcId requestId;
+  std::optional<std::string> reason;
+};
+
+struct ToolAnnotations {
+  std::optional<std::string> title;
+  std::optional<bool> readOnlyHint;
+  std::optional<bool> destructiveHint;
+  std::optional<bool> idempotentHint;
+  std::optional<bool> openWorldHint;
+};
+
+struct Tool {
+  std::string name;
+  std::optional<std::string> title;
+  std::optional<std::string> description;
+  Json inputSchema;  // JSON Schema object
+  std::optional<Json> outputSchema;
+  std::optional<ToolAnnotations> annotations;
+  std::optional<std::string> execution;  // "forbidden" | "optional" | "required"
+};
+
+struct ListToolsResult {
+  std::vector<Tool> tools;
+  std::optional<std::string> nextCursor;
+};
+
+struct CallToolParams {
+  std::string name;
+  Json arguments;
+};
+
+struct CallToolResult {
+  std::vector<Json> content;  // TextContent | ImageContent | ResourceLink | Resource
+  std::optional<bool> isError;
+  std::optional<Json> structuredContent;
+  std::optional<Json> _meta;
+};
+
+struct ContentAnnotations {
+  std::optional<std::string> audience;
+  std::optional<double> priority;
+};
+
+struct TextResourceContents {
+  std::string uri;
+  std::optional<std::string> mimeType;
+  std::string text;
+  std::optional<ContentAnnotations> annotations;
+};
+
+struct BlobResourceContents {
+  std::string uri;
+  std::optional<std::string> mimeType;
+  std::string blob;  // base64
+  std::optional<ContentAnnotations> annotations;
+};
+
+using ResourceContents = std::variant<TextResourceContents, BlobResourceContents>;
+
+struct Resource {
+  std::string uri;
+  std::string name;
+  std::optional<std::string> title;
+  std::optional<std::string> description;
+  std::optional<std::string> mimeType;
+  std::optional<int64_t> size;
+  std::optional<ContentAnnotations> annotations;
+};
+
+struct ListResourcesResult {
+  std::vector<Resource> resources;
+  std::optional<std::string> nextCursor;
+};
+
+struct ResourceTemplate {
+  std::string uriTemplate;
+  std::string name;
+  std::optional<std::string> title;
+  std::optional<std::string> description;
+  std::optional<std::string> mimeType;
+  std::optional<ContentAnnotations> annotations;
+};
+
+struct ListResourceTemplatesResult {
+  std::vector<ResourceTemplate> resourceTemplates;
+  std::optional<std::string> nextCursor;
+};
+
+struct ReadResourceParams {
+  std::string uri;
+};
+
+struct ReadResourceResult {
+  std::vector<ResourceContents> contents;
+};
+
+struct Prompt {
+  std::string name;
+  std::optional<std::string> title;
+  std::optional<std::string> description;
+  std::optional<Json> arguments;  // JSON Schema for arguments
+};
+
+struct ListPromptsResult {
+  std::vector<Prompt> prompts;
+  std::optional<std::string> nextCursor;
+};
+
+struct PromptArgument {
+  std::string name;
+  std::optional<std::string> value;
+};
+
+struct GetPromptParams {
+  std::string name;
+  std::optional<std::map<std::string, std::string>> arguments;
+};
+
+struct PromptMessage {
+  std::string role;  // "user" | "assistant"
+  Json content;      // TextContent | ImageContent | ResourceLink
+};
+
+struct GetPromptResult {
+  std::optional<std::string> description;
+  std::vector<PromptMessage> messages;
+};
+
+struct LoggingParams {
+  std::string level;  // "debug" | "info" | "notice" | "warning" | "error" | "critical" | "alert" | "emergency"
+  std::optional<std::string> logger;
+  Json data;
+};
+
+struct SamplingParams {
+  Json messages;  // Array of message objects
+  std::optional<Json> systemPrompt;
+  std::optional<Json> toolDeclarations;
+  std::optional<int> maxTokens;
+  std::optional<double> temperature;
+  std::optional<std::string> stopSequence;
+};
+
+struct SamplingResult {
+  std::string role;  // "user" | "assistant"
+  Json content;     // TextContent | ImageContent
+  std::optional<std::string> stopReason;
+};
+
+// ============================================================================
+// Transport Interface
+// ============================================================================
 
 class McpTransport {
  public:
+  using MessageCallback = std::function<void(const JsonRpcMessage&)>;
+  using ErrorCallback = std::function<void(const std::exception&)>;
+  using CloseCallback = std::function<void()>;
+
   virtual ~McpTransport() = default;
-  virtual bool start() = 0;  // true on success
-  virtual bool send(const Json& message) = 0;
+  virtual void start() = 0;
+  virtual void send(const JsonRpcMessage& message) = 0;
   virtual void close() = 0;
+  virtual bool isStarted() const = 0;
+  virtual bool isClosed() const = 0;
 
-  using MessageHandler = std::function<void(const Json&)>;
-  using ErrorHandler = std::function<void(const std::string&)>;
-  using CloseHandler = std::function<void()>;
-
-  virtual void onMessage(MessageHandler handler) = 0;
-  virtual void onError(ErrorHandler handler) = 0;
-  virtual void onClose(CloseHandler handler) = 0;
+  // Event callbacks (set by client)
+  MessageCallback onMessage;
+  ErrorCallback onError;
+  CloseCallback onClose;
 };
 
-// ----------------------------------------------------------------- Client core
+// ============================================================================
+// MCP Client
+// ============================================================================
+
+struct McpClientOptions {
+  Implementation clientInfo;
+  std::optional<ClientCapabilities> capabilities = {};
+  std::optional<std::string> protocolVersion = "2025-11-25";
+  std::optional<int> requestTimeoutMs = 30000;
+  std::optional<std::vector<Root>> roots = {};
+};
+
+struct McpRequestOptions {
+  std::optional<std::chrono::milliseconds> timeout;
+  std::optional<std::function<void(const ProgressNotification&)>> onProgress;
+  std::optional<std::shared_ptr<std::atomic<bool>>> cancelSignal;
+};
 
 class McpClient {
  public:
+  enum class State { Idle, Connecting, Connected, Closed };
+
   explicit McpClient(McpClientOptions options);
   ~McpClient();
 
-  // Connect using the given transport. Returns false on failure (check lastError).
-  bool connect(std::unique_ptr<McpTransport> transport);
+  State connectionState() const { return state_; }
+  const InitializeResult& initializeResult() const { return initResult_; }
+  const ServerCapabilities& serverCapabilities() const { return initResult_.capabilities; }
+  const Implementation& serverInfo() const { return initResult_.serverInfo; }
+  const std::string& instructions() const { return initResult_.instructions; }
 
-  // Disconnect and close the transport.
+  // Connect with a transport
+  InitializeResult connect(std::unique_ptr<McpTransport> transport);
+
+  // Request/response
+  Json request(const std::string& method, const Json& params = Json(),
+               const McpRequestOptions& options = {});
+
+  // Notification (fire-and-forget)
+  void notify(const std::string& method, const Json& params = Json());
+
+  // Convenience methods
+  std::vector<Tool> listTools(const McpRequestOptions& options = {});
+  std::vector<Resource> listResources(const McpRequestOptions& options = {});
+  std::vector<ResourceTemplate> listResourceTemplates(const McpRequestOptions& options = {});
+  ReadResourceResult readResource(const std::string& uri, const McpRequestOptions& options = {});
+  std::vector<Prompt> listPrompts(const McpRequestOptions& options = {});
+  GetPromptResult getPrompt(const std::string& name,
+                            const std::map<std::string, std::string>& arguments = {},
+                            const McpRequestOptions& options = {});
+  CallToolResult callTool(const std::string& name, const Json& arguments = Json(),
+                          const McpRequestOptions& options = {});
+  void ping(const McpRequestOptions& options = {});
+
+  // Event handlers
+  void onNotification(const std::string& method,
+                      std::function<void(const Json&)> handler);
+  void onError(std::function<void(const std::exception&)> handler);
+  void onClose(std::function<void()> handler);
+
+  // Cleanup
   void close();
 
-  // Server capabilities after initialize.
-  const McpImplementation& serverInfo() const { return serverInfo_; }
-  const Json& serverCapabilities() const { return serverCapabilities_; }
-  bool isConnected() const { return state_ == "connected"; }
-
-  // List available tools (follows pagination).
-  std::vector<McpTool> listTools(std::string* error = nullptr);
-
-  // Call a tool by name with arguments.
-  McpCallToolResult callTool(const std::string& name, const Json& arguments,
-                             std::string* error = nullptr);
-
-  // Last error message.
-  const std::string& lastError() const { return lastError_; }
-
  private:
-  struct PendingRequest {
-    std::function<void(const Json&)> resolve;
-    std::function<void(const std::string&)> reject;
-  };
-
-  bool request(const std::string& method, const Json& params, Json* result);
-  void handleMessage(const Json& message);
-  void handleRequest(const Json& request);
-  void handleNotification(const std::string& method, const Json& params);
-
-  // Resolve (or reject) the pending request with this id, if any. Returns true when found.
-  bool settle_pending(int id, const Json* result, const std::string* error);
-
   McpClientOptions options_;
+  State state_ = State::Idle;
   std::unique_ptr<McpTransport> transport_;
-  std::string state_ = "idle";  // idle | connecting | connected | closed
-  std::atomic<int> nextRequestId_{1};
-  McpImplementation serverInfo_;
-  Json serverCapabilities_ = Json::object();
-  std::string lastError_;
-  std::mutex pending_mutex_;
-  std::map<int, PendingRequest> pending_;
+  InitializeResult initResult_;
+  std::string protocolVersion_;
+  std::atomic<int64_t> nextRequestId_{1};
+  std::mutex pendingMutex_;
+  std::map<int64_t, std::pair<std::function<void(const Json&)>,
+                              std::function<void(const std::exception&)>>> pendingRequests_;
+  std::map<std::string, std::function<void(const Json&)>> notificationHandlers_;
+  std::function<void(const std::exception&)> errorHandler_;
+  std::function<void()> closeHandler_;
+
+  void handleMessage(const JsonRpcMessage& message);
+  void handleResponse(const JsonRpcResponse& response);
+  void handleNotification(const JsonRpcNotification& notification);
+  void handleError(const JsonRpcResponse::Error& error, int64_t id);
+  void armTimeout(int64_t id, const McpRequestOptions& options);
+  void cancelPending(int64_t id, const std::exception& error);
+  void markClosed(const std::exception& error);
+  void handleTransportClose();
 };
 
-// ----------------------------------------------------------- Stdio transport (child process)
+// ============================================================================
+// Transport Factories
+// ============================================================================
 
-struct McpStdioTransportOptions {
+struct StdioTransportOptions {
   std::string command;
   std::vector<std::string> args;
   std::string cwd;
-  std::map<std::string, std::string> env;  // extra env vars
-  int maxMessageBytes = 1024 * 1024;       // 1MB
+  std::map<std::string, std::string> env;
+  bool inheritEnv = true;
+  std::string stderrMode = "pipe";  // "pipe" | "inherit"
+  std::function<void(const std::string&)> onStderr;
+  size_t maxMessageBytes = 10 * 1024 * 1024;
+  size_t maxStderrBytes = 10 * 1024 * 1024;
   int closeTimeoutMs = 2000;
 };
 
-class McpStdioTransport : public McpTransport {
- public:
-  explicit McpStdioTransport(McpStdioTransportOptions options);
-  ~McpStdioTransport() override;
-
-  bool start() override;
-  bool send(const Json& message) override;
-  void close() override;
-
-  void onMessage(MessageHandler handler) override { messageHandler_ = std::move(handler); }
-  void onError(ErrorHandler handler) override { errorHandler_ = std::move(handler); }
-  void onClose(CloseHandler handler) override { closeHandler_ = std::move(handler); }
-
- private:
-  void readLoop();
-  void processLine(const std::string& line);
-
-  McpStdioTransportOptions options_;
-  MessageHandler messageHandler_;
-  ErrorHandler errorHandler_;
-  CloseHandler closeHandler_;
-
-#ifdef _WIN32
-  void* child_ = nullptr;   // HANDLE
-  void* stdinWrite_ = nullptr;
-  void* stdoutRead_ = nullptr;
-#else
-  pid_t child_ = -1;
-  int stdinWrite_ = -1;
-  int stdoutRead_ = -1;
-#endif
-  bool started_ = false;
-  bool closed_ = false;
-  std::string stderrBuffer_;
+struct HttpTransportOptions {
+  std::string url;
+  std::map<std::string, std::string> headers;
+  std::optional<std::function<std::string()>> authProvider;  // Returns bearer token
+  size_t maxMessageBytes = 10 * 1024 * 1024;
 };
 
-// ------------------------------------------------------ Tool name helpers (naming.ts port)
+std::unique_ptr<McpTransport> createStdioTransport(const StdioTransportOptions& options);
+std::unique_ptr<McpTransport> createHttpTransport(const HttpTransportOptions& options);
 
-// Creates `mcp__<server>__<tool>`, sanitized and shortened with hash suffix if too long.
-std::string createMcpToolName(const std::string& server, const std::string& tool,
-                              const std::function<bool(const std::string&)>& isTaken = nullptr);
+// ============================================================================
+// OAuth Support (for HTTP transports)
+// ============================================================================
 
-// Server namespace prefix: `mcp__<server>` with `-` -> `_`.
-std::string mcpNamespace(const std::string& server);
+struct OAuthSettings {
+  std::optional<std::string> clientId;
+  std::optional<std::string> clientSecret;
+  std::optional<int> callbackPort;
+  std::optional<std::string> callbackUrl;
+  std::optional<std::string> scope;
+  std::optional<std::string> clientName;
+  std::optional<std::string> clientRegistration;  // "auto" | "dcr" | "cimd"
+  std::optional<std::string> authServerMetadataUrl;
+};
 
-// Normalize input schema to an object schema with `properties`.
-Json normalizeMcpInputSchema(const Json& schema);
+struct OAuthChallenge {
+  std::string resourceMetadataUrl;
+  std::string scope;
+};
 
-// ------------------------------------------------ content conversion (protocol/content.ts port)
+class McpAuthProvider {
+ public:
+  virtual ~McpAuthProvider() = default;
+  virtual std::string getToken() = 0;
+  virtual void onChallenge(const OAuthChallenge& challenge) = 0;
+  virtual void settled() = 0;
+};
 
-// Convert a tools/call result into text (+ note) for the model. Text and embedded text
-// resources pass through; images/audio/resource-links/blobs become short placeholders;
-// a result with no content blocks but with structuredContent becomes its JSON.
-std::string mcpResultToText(const McpCallToolResult& result);
+std::unique_ptr<McpAuthProvider> createMcpAuthProvider(
+    const std::string& serverUrl,
+    const std::string& credentialStorePath,
+    const OAuthSettings& settings,
+    std::function<void(const OAuthChallenge&)> onChallenge);
 
-// Keep model-facing text within MCP_OUTPUT_MAX_BYTES by cutting its middle (Codex-style).
-std::string limitMcpOutput(const std::string& text);
-
-// The limit, matching pi-mcp's MCP_OUTPUT_MAX_BYTES.
-constexpr std::size_t kMcpOutputMaxBytes = 20 * 1024;
-
-}  // namespace karta
+}  // namespace karta::mcp

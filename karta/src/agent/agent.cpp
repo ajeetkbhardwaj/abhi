@@ -1,6 +1,7 @@
 #include "karta/agent/agent.h"
 
 #include <algorithm>
+#include <future>
 #include <sstream>
 
 namespace karta {
@@ -88,6 +89,11 @@ std::vector<Json> Agent::prompt(const std::string& text, bool emit_agent_start) 
   emit("message_start", message);
   emit("message_end", message);
   run_loop(produced);
+  
+  // Final agent_end with all messages (matching pi format)
+  Json agent_end_payload = Json::object();
+  agent_end_payload.set("messages", message_list(messages_));
+  emit("agent_end", agent_end_payload);
   return produced;
 }
 
@@ -134,6 +140,11 @@ void Agent::run_loop(std::vector<Json>& produced) {
           [&](const std::string& delta) {
             Json update = Json::object();
             update.set("delta", delta);
+            // Include assistantMessageEvent for pi compatibility
+            Json event = Json::object();
+            event.set("type", "text_delta");
+            event.set("text", delta);
+            update.set("assistantMessageEvent", event);
             emit("message_update", update);
           },
           &interrupted_);
@@ -182,7 +193,9 @@ void Agent::run_loop(std::vector<Json>& produced) {
       emit("turn_end", turn_end);
 
       if (terminate) {
-        emit("agent_end", Json::object());
+        Json agent_end_payload = Json::object();
+        agent_end_payload.set("messages", message_list(messages_));
+        emit("agent_end", agent_end_payload);
         return;
       }
 
@@ -208,44 +221,161 @@ void Agent::run_loop(std::vector<Json>& produced) {
     break;
   }
 
-  emit("agent_end", Json::object());
+  Json agent_end_payload = Json::object();
+  agent_end_payload.set("messages", message_list(messages_));
+  emit("agent_end", agent_end_payload);
 }
 
 Agent::ToolBatch Agent::execute_tool_calls(const Json& assistant_message) {
   ToolBatch batch;
   ToolContext context{options_.cwd};
 
-  for (const Json& call : tool_calls_of(assistant_message)) {
-    const std::string id = call["id"].as_string();
-    const std::string name = call["name"].as_string();
-
-    Json arguments = Json::object();
+  // Collect all tool calls first
+  struct ToolCallInfo {
+    std::string id;
+    std::string name;
+    Json arguments;
     std::string parse_error;
+  };
+
+  std::vector<ToolCallInfo> calls;
+  for (const Json& call : tool_calls_of(assistant_message)) {
+    ToolCallInfo info;
+    info.id = call["id"].as_string();
+    info.name = call["name"].as_string();
     if (call["arguments"].is_string()) {
       const std::string raw = call["arguments"].as_string();
-      if (!raw.empty()) arguments = Json::parse(raw, &parse_error);
+      if (!raw.empty()) info.arguments = Json::parse(raw, &info.parse_error);
     } else if (call["arguments"].is_object()) {
-      arguments = call["arguments"];
+      info.arguments = call["arguments"];
     }
+    calls.push_back(std::move(info));
+  }
 
+  // Determine which calls can run in parallel (non-overlapping file writes)
+  // For simplicity, we'll run read-only tools in parallel, and write tools sequentially
+  // A more sophisticated approach would analyze oldText/newText paths
+  auto is_read_only_tool = [](const std::string& name) {
+    return name == "read" || name == "grep" || name == "find" || name == "ls" || name == "glob" || name == "bash";
+  };
+
+  // Execute read-only tools in parallel
+  using ParallelResult = std::pair<size_t, ToolOutcome>;
+  std::vector<std::future<ParallelResult>> parallel_results;
+  std::vector<size_t> parallel_indices;
+  std::vector<ToolOutcome> outcomes(calls.size());
+
+  for (size_t i = 0; i < calls.size(); ++i) {
+    const auto& info = calls[i];
+    
+    if (is_read_only_tool(info.name) && info.parse_error.empty()) {
+      parallel_indices.push_back(i);
+    }
+  }
+
+  // Launch parallel read-only tools
+  for (size_t idx : parallel_indices) {
+    parallel_results.emplace_back(std::async(std::launch::async, [this, &calls, idx, &context]() {
+      const auto& info = calls[idx];
+      // before_tool_call hook
+      if (options_.before_tool_call) {
+        options_.before_tool_call(info.name, info.arguments);
+      }
+      
+      const ToolDefinition* tool = find_tool(options_.tools, info.name);
+      if (!tool) {
+        ToolOutcome outcome;
+        outcome.text = "Unknown tool: " + info.name;
+        outcome.is_error = true;
+        return ParallelResult(idx, outcome);
+      }
+      try {
+        ToolOutcome outcome = tool->execute(info.arguments, context);
+        return ParallelResult(idx, outcome);
+      } catch (const std::exception& error) {
+        ToolOutcome outcome;
+        outcome.text = std::string("Tool failed: ") + error.what();
+        outcome.is_error = true;
+        return ParallelResult(idx, outcome);
+      }
+    }));
+  }
+
+  // Wait for parallel results and emit events
+  for (auto& fut : parallel_results) {
+    auto [idx, outcome] = fut.get();
+    const auto& info = calls[idx];
+    
     Json start = Json::object();
-    start.set("toolCallId", id);
-    start.set("toolName", name);
-    start.set("arguments", arguments);
+    start.set("toolCallId", info.id);
+    start.set("toolName", info.name);
+    start.set("arguments", info.arguments);
     emit("tool_execution_start", start);
 
+    const Json message = make_tool_result_message(info.id, info.name, outcome.text, outcome.is_error);
+    batch.messages.push_back(message);
+
+    // after_tool_call hook
+    if (options_.after_tool_call) {
+      Json result = Json::object();
+      result.set("content", message["content"]);
+      result.set("isError", outcome.is_error);
+      options_.after_tool_call(info.name, info.arguments, result);
+    }
+
+    Json update = Json::object();
+    update.set("toolCallId", info.id);
+    update.set("toolName", info.name);
+    update.set("arguments", info.arguments);
+    update.set("partialResult", outcome.text);
+    emit("tool_execution_update", update);
+
+    Json end = Json::object();
+    end.set("toolCallId", info.id);
+    end.set("toolName", info.name);
+    end.set("isError", outcome.is_error);
+    end.set("result", outcome.text);
+    emit("tool_execution_end", end);
+
+    if (outcome.terminate) {
+      batch.terminate = true;
+    }
+  }
+
+  // Execute remaining tools sequentially (write tools and any that had parse errors)
+  for (size_t i = 0; i < calls.size(); ++i) {
+    // Skip already executed parallel tools
+    bool was_parallel = false;
+    for (size_t pidx : parallel_indices) {
+      if (pidx == i) { was_parallel = true; break; }
+    }
+    if (was_parallel) continue;
+
+    const auto& info = calls[i];
+
+    Json start = Json::object();
+    start.set("toolCallId", info.id);
+    start.set("toolName", info.name);
+    start.set("arguments", info.arguments);
+    emit("tool_execution_start", start);
+
+    // before_tool_call hook
+    if (options_.before_tool_call) {
+      options_.before_tool_call(info.name, info.arguments);
+    }
+
     ToolOutcome outcome;
-    if (!parse_error.empty()) {
-      outcome.text = "Invalid tool arguments: " + parse_error;
+    if (!info.parse_error.empty()) {
+      outcome.text = "Invalid tool arguments: " + info.parse_error;
       outcome.is_error = true;
     } else {
-      const ToolDefinition* tool = find_tool(options_.tools, name);
+      const ToolDefinition* tool = find_tool(options_.tools, info.name);
       if (!tool) {
-        outcome.text = "Unknown tool: " + name;
+        outcome.text = "Unknown tool: " + info.name;
         outcome.is_error = true;
       } else {
         try {
-          outcome = tool->execute(arguments, context);
+          outcome = tool->execute(info.arguments, context);
         } catch (const std::exception& error) {
           outcome.text = std::string("Tool failed: ") + error.what();
           outcome.is_error = true;
@@ -253,12 +383,27 @@ Agent::ToolBatch Agent::execute_tool_calls(const Json& assistant_message) {
       }
     }
 
-    const Json message = make_tool_result_message(id, name, outcome.text, outcome.is_error);
+    const Json message = make_tool_result_message(info.id, info.name, outcome.text, outcome.is_error);
     batch.messages.push_back(message);
 
+    // after_tool_call hook
+    if (options_.after_tool_call) {
+      Json result = Json::object();
+      result.set("content", message["content"]);
+      result.set("isError", outcome.is_error);
+      options_.after_tool_call(info.name, info.arguments, result);
+    }
+
+    Json update = Json::object();
+    update.set("toolCallId", info.id);
+    update.set("toolName", info.name);
+    update.set("arguments", info.arguments);
+    update.set("partialResult", outcome.text);
+    emit("tool_execution_update", update);
+
     Json end = Json::object();
-    end.set("toolCallId", id);
-    end.set("toolName", name);
+    end.set("toolCallId", info.id);
+    end.set("toolName", info.name);
     end.set("isError", outcome.is_error);
     end.set("result", outcome.text);
     emit("tool_execution_end", end);
@@ -280,6 +425,23 @@ Agent::ToolBatch Agent::fail_truncated_tool_calls(const Json& assistant_message)
         "Tool call not executed: the response hit the model's output limit, so its arguments may "
         "be truncated. Re-issue the call with a smaller response.";
     batch.messages.push_back(make_tool_result_message(id, name, text, true));
+
+    Json arguments = Json::object();
+    std::string parse_error;
+    if (call["arguments"].is_string()) {
+      const std::string raw = call["arguments"].as_string();
+      if (!raw.empty()) arguments = Json::parse(raw, &parse_error);
+    } else if (call["arguments"].is_object()) {
+      arguments = call["arguments"];
+    }
+
+    // Emit tool_execution_update with partialResult for pi compatibility
+    Json update = Json::object();
+    update.set("toolCallId", id);
+    update.set("toolName", name);
+    update.set("arguments", arguments);
+    update.set("partialResult", text);
+    emit("tool_execution_update", update);
 
     Json end = Json::object();
     end.set("toolCallId", id);

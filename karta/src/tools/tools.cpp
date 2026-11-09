@@ -674,6 +674,54 @@ ToolOutcome grep_tool(const Json& args, ToolContext& context) {
   return outcome;
 }
 
+ToolOutcome glob_tool(const Json& args, ToolContext& context) {
+  ToolOutcome outcome;
+  const std::string pattern = args["pattern"].as_string();
+  if (pattern.empty()) {
+    outcome.text = "pattern is required";
+    outcome.is_error = true;
+    return outcome;
+  }
+  const std::string search_path = resolve_path(args["path"].as_string(), context.cwd);
+  long long limit = args["limit"].as_int(1000);
+  if (limit < 1) limit = 1;
+
+  std::error_code error;
+  if (!fs::is_directory(search_path, error)) {
+    outcome.text = "not a directory: " + args["path"].as_string();
+    outcome.is_error = true;
+    return outcome;
+  }
+  const IgnoreRules rules = load_ignore_rules(search_path);
+  const bool ignore_case = os_description() == "windows";
+
+  std::vector<std::string> results;
+  walk_files(search_path, rules, [&](const fs::directory_entry& entry) {
+    const std::string relative = fs::relative(entry.path(), search_path).generic_string();
+    if (glob_match(pattern, relative, ignore_case)) results.push_back(relative);
+  });
+  std::sort(results.begin(), results.end());
+
+  const bool limit_hit = static_cast<long long>(results.size()) > limit;
+  if (limit_hit) results.resize(static_cast<std::size_t>(limit));
+
+  if (results.empty()) {
+    outcome.text = "No files found";
+    return outcome;
+  }
+  std::string joined;
+  for (const std::string& result : results) joined += result + "\n";
+  while (!joined.empty() && joined.back() == '\n') joined.pop_back();
+  const Truncated truncated = truncate_head(joined, static_cast<std::size_t>(-1), kMaxBytes);
+  outcome.text = truncated.text;
+  if (limit_hit) {
+    outcome.text += "\n\n[" + std::to_string(limit) + " results limit reached. Use limit=" +
+                    std::to_string(limit * 2) + " for more, or refine pattern]";
+  }
+  if (truncated.truncated) outcome.text += "\n\n[" + size_label(kMaxBytes) + " limit reached]";
+  return outcome;
+}
+
 ToolOutcome find_tool_impl(const Json& args, ToolContext& context) {
   ToolOutcome outcome;
   const std::string pattern = args["pattern"].as_string();
@@ -874,6 +922,22 @@ std::vector<ToolDefinition> builtin_tools() {
         "100 matches or 50KB.";
     tool.parameters = schema_object(properties, {"pattern"});
     tool.execute = grep_tool;
+    tools.push_back(std::move(tool));
+  }
+
+  {
+    Json properties = Json::object();
+    properties.set("pattern", string_property("Glob pattern to match files, e.g. '*.ts' or 'src/**/*.json'"));
+    properties.set("path", string_property("Directory to search in (default: current directory)"));
+    properties.set("limit", number_property("Maximum number of results (default: 1000)"));
+    ToolDefinition tool;
+    tool.name = "glob";
+    tool.description =
+        "Find files matching a glob pattern. Returns matching file paths relative to the search "
+        "directory. Skips .git, node_modules and .gitignore-matched paths. Unlike 'find', this "
+        "matches the full relative path against the pattern.";
+    tool.parameters = schema_object(properties, {"pattern"});
+    tool.execute = glob_tool;
     tools.push_back(std::move(tool));
   }
 

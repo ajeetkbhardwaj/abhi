@@ -11,9 +11,10 @@
 namespace karta {
 
 struct ToolCall {
-  std::string id;         // provider-assigned call id
-  std::string name;       // tool name
-  std::string arguments;  // raw JSON object text
+  std::string id;              // provider-assigned call id
+  std::string name;            // tool name
+  std::string arguments;       // raw JSON object text
+  std::string idempotency_key; // client-generated key for deduplication
 };
 
 struct Usage {
@@ -70,9 +71,17 @@ std::vector<std::string> fetch_models(const ModelSpec& spec, std::string* error,
 
 // Canonical AgentMessage helpers, shared by the agent loop and session replay.
 Json make_user_message(const std::string& text);
+Json make_user_message_with_images(const std::string& text, const std::vector<std::pair<std::string, std::string>>& images);
 Json make_assistant_message(const AssistantTurn& turn);
 Json make_tool_result_message(const std::string& call_id, const std::string& tool_name,
                               const std::string& text, bool is_error);
+Json make_tool_result_message_extended(const std::string& call_id,
+                                       const std::string& tool_name,
+                                       const Json& content,
+                                       bool is_error,
+                                       const Json* details = nullptr,
+                                       const Json* usage = nullptr,
+                                       long long duration_ms = -1);
 std::string message_text(const Json& message);
 
 }  // namespace karta

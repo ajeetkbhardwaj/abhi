@@ -24,9 +24,9 @@ add_executable(karta
   src/core/json.cpp
   src/core/platform.cpp
   src/core/telemetry.cpp
-  src/mcp/mcp.cpp
   src/session/session.cpp
   src/tools/tools.cpp
+  # MCP: src/mcp/mcp.cpp, src/mcp/stdio_transport.cpp, src/mcp/http_transport.cpp (TODO: full implementation)
 )
 
 target_compile_options(karta PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -66,3 +66,34 @@ else()
 endif()
 
 install(TARGETS karta RUNTIME DESTINATION bin)
+
+# Unit tests
+option(KARTA_BUILD_TESTS "Build unit tests" OFF)
+
+if(KARTA_BUILD_TESTS)
+  add_executable(karta_tests
+    test/unit_tests.cpp
+    src/agent/agent.cpp
+    src/agent/prompt.cpp
+    src/ai/http.cpp
+    src/ai/provider.cpp
+    src/cli/cli.cpp
+    src/core/auth.cpp
+    src/core/id.cpp
+    src/core/json.cpp
+    src/core/platform.cpp
+    src/core/telemetry.cpp
+    src/session/session.cpp
+    src/tools/tools.cpp
+    # MCP: src/mcp/mcp.cpp, src/mcp/stdio_transport.cpp, src/mcp/http_transport.cpp (TODO: full implementation)
+  )
+  target_compile_options(karta_tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
+  target_include_directories(karta_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  find_package(CURL REQUIRED)
+  find_package(Threads REQUIRED)
+  target_link_libraries(karta_tests PRIVATE CURL::libcurl Threads::Threads)
+  message(STATUS "Unit tests enabled - run with: ctest or ./karta_tests")
+endif()

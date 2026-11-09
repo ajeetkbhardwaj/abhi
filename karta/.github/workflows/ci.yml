@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }}, TUI=${{ matrix.tui }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        tui: ["ON", "OFF"]
+        include:
+          - os: ubuntu-latest
+            tui: "ON"
+            artifact-name: karta-linux-tui
+          - os: ubuntu-latest
+            tui: "OFF"
+            artifact-name: karta-linux-no-tui
+          - os: macos-latest
+            tui: "ON"
+            artifact-name: karta-macos-tui
+          - os: macos-latest
+            tui: "OFF"
+            artifact-name: karta-macos-no-tui
+          - os: windows-latest
+            tui: "ON"
+            artifact-name: karta-windows-tui.exe
+          - os: windows-latest
+            tui: "OFF"
+            artifact-name: karta-windows-no-tui.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libncursesw5-dev cmake g++ pkg-config
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install curl ncurses cmake
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install cmake curl --no-progress
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -DKARTA_BUILD_TUI=${{ matrix.tui }} -DKARTA_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j4
+
+      - name: Test
+        run: ./build/karta_tests
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: build/karta*
+          if-no-files-found: warn
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run clang-format check
+        run: |
+          find . -name '*.cpp' -o -name '*.h' -o -name '*.hpp' | xargs clang-format --dry-run --Werror
+
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run clang-format
+        run: |
+          find . -name '*.cpp' -o -name '*.h' -o -name '*.hpp' | xargs clang-format -i
+      - name: Check for changes
+        run: |
+          if ! git diff --quiet; then
+            echo "Code is not formatted. Please run clang-format locally."
+            git diff
+            exit 1
+          fi

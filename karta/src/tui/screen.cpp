@@ -345,6 +345,65 @@ Key Tui::poll(int* out_ch) {
       return Key::Right;
     }
 
+    // Ctrl+Left / Ctrl+Right (word navigation)
+    case 545:  // KEY_SLEFT (Ctrl+Left)
+      return Key::CtrlLeft;
+    case 560:  // KEY_SRIGHT (Ctrl+Right)
+      return Key::CtrlRight;
+    case 566:  // KEY_SHOME (Ctrl+Home)
+      return Key::Home;
+    case 567:  // KEY_SEND (Ctrl+End)
+      return Key::End;
+    // Ctrl+Up / Ctrl+Down
+    case 568:  // KEY_SPREVIOUS (Ctrl+Up)
+      return Key::CtrlUp;
+    case 569:  // KEY_SNEXT (Ctrl+Down)
+      return Key::CtrlDown;
+    // Shift+Tab
+    case 353:  // KEY_STAB (Shift+Tab)
+      return Key::ShiftTab;
+    // Ctrl+Backspace / Ctrl+Delete
+    case 513:  // Ctrl+Backspace (KEY_DC with Ctrl)
+      return Key::CtrlBackspace;
+    case 514:  // Ctrl+Delete
+      return Key::CtrlDelete;
+    // Ctrl+A / Ctrl+E / Ctrl+K / Ctrl+U / Ctrl+W
+    case 1:   // Ctrl+A (beginning of line)
+      cursor_ = 0;
+      return Key::CtrlA;
+    case 5:   // Ctrl+E (end of line)
+      cursor_ = input_.size();
+      return Key::CtrlE;
+    case 11:  // Ctrl+K (kill to end)
+      input_.erase(cursor_);
+      return Key::CtrlK;
+    case 21:  // Ctrl+U (kill to beginning)
+      input_.erase(0, cursor_);
+      cursor_ = 0;
+      return Key::CtrlU;
+    case 23:  // Ctrl+W (kill word backward)
+      if (cursor_ > 0) {
+        std::size_t begin = cursor_;
+        while (begin > 0 && input_[begin - 1] == ' ') --begin;
+        while (begin > 0 && input_[begin - 1] != ' ') --begin;
+        input_.erase(begin, cursor_ - begin);
+        cursor_ = begin;
+      }
+      return Key::CtrlW;
+    // F keys
+    case KEY_F(1): return Key::F1;
+    case KEY_F(2): return Key::F2;
+    case KEY_F(3): return Key::F3;
+    case KEY_F(4): return Key::F4;
+    case KEY_F(5): return Key::F5;
+    case KEY_F(6): return Key::F6;
+    case KEY_F(7): return Key::F7;
+    case KEY_F(8): return Key::F8;
+    case KEY_F(9): return Key::F9;
+    case KEY_F(10): return Key::F10;
+    case KEY_F(11): return Key::F11;
+    case KEY_F(12): return Key::F12;
+
     case KEY_HOME:
       cursor_ = 0;
       return Key::Home;

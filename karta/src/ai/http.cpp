@@ -2,7 +2,9 @@
 
 #include <curl/curl.h>
 
+#include <chrono>
 #include <mutex>
+#include <thread>
 
 namespace karta {
 namespace {
@@ -37,58 +39,89 @@ void ensure_global_init() {
 
 }  // namespace
 
+bool is_retryable_error(CURLcode code, long http_status) {
+  // Retry on network errors, timeouts, and 5xx server errors
+  if (code != CURLE_OK) {
+    // Network/timeout errors that are transient
+    return code == CURLE_OPERATION_TIMEDOUT ||
+           code == CURLE_COULDNT_CONNECT ||
+           code == CURLE_COULDNT_RESOLVE_HOST ||
+           code == CURLE_RECV_ERROR ||
+           code == CURLE_SEND_ERROR ||
+           code == CURLE_PARTIAL_FILE ||
+           code == CURLE_SSL_CONNECT_ERROR;
+  }
+  // Retry on 5xx server errors
+  return http_status >= 500 && http_status < 600;
+}
+
 HttpResponse http_post_stream(const std::string& url, const std::vector<std::string>& headers,
                               const std::string& body, const ChunkCallback& on_chunk,
                               const std::atomic<bool>* cancel) {
   ensure_global_init();
 
+  const int max_retries = 3;
+  const std::chrono::milliseconds base_delay(500);
   HttpResponse result;
-  CURL* curl = curl_easy_init();
-  if (!curl) {
-    result.error = "failed to initialize libcurl";
-    return result;
-  }
-
-  curl_slist* header_list = nullptr;
-  for (const std::string& header : headers) header_list = curl_slist_append(header_list, header.c_str());
-
-  WriteState state;
-  state.on_chunk = &on_chunk;
-
-  std::string error_buffer;
-  error_buffer.resize(CURL_ERROR_SIZE);
-
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_POST, 1L);
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
-  curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer.data());
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "karta/0.1");
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-  if (cancel) {
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
-    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, cancel);
-  }
-
-  const CURLcode code = curl_easy_perform(curl);
-  if (code != CURLE_OK) {
-    if (code == CURLE_ABORTED_BY_CALLBACK && cancel && cancel->load()) {
-      result.error = "aborted";
-    } else {
-      result.error = error_buffer.empty() ? curl_easy_strerror(code) : error_buffer;
+  
+  for (int attempt = 0; attempt <= max_retries; ++attempt) {
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+      result.error = "failed to initialize libcurl";
+      return result;
     }
-  }
 
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.status);
-  curl_slist_free_all(header_list);
-  curl_easy_cleanup(curl);
+    curl_slist* header_list = nullptr;
+    for (const std::string& header : headers) header_list = curl_slist_append(header_list, header.c_str());
+
+    WriteState state;
+    state.on_chunk = &on_chunk;
+
+    std::string error_buffer;
+    error_buffer.resize(CURL_ERROR_SIZE);
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer.data());
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "karta/0.1");
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    if (cancel) {
+      curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+      curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+      curl_easy_setopt(curl, CURLOPT_XFERINFODATA, cancel);
+    }
+
+    const CURLcode code = curl_easy_perform(curl);
+    if (code != CURLE_OK) {
+      if (code == CURLE_ABORTED_BY_CALLBACK && cancel && cancel->load()) {
+        result.error = "aborted";
+      } else {
+        result.error = error_buffer.empty() ? curl_easy_strerror(code) : error_buffer;
+      }
+    }
+
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.status);
+    curl_slist_free_all(header_list);
+    curl_easy_cleanup(curl);
+
+    // Check if we should retry
+    if (attempt < max_retries && is_retryable_error(code, result.status) && result.error != "aborted") {
+      // Exponential backoff: 500ms, 1000ms, 2000ms
+      std::chrono::milliseconds delay = base_delay * (1 << attempt);
+      std::this_thread::sleep_for(delay);
+      continue;
+    }
+    
+    break;
+  }
   return result;
 }
 

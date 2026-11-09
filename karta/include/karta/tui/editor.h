@@ -16,9 +16,11 @@ class Editor {
 
   Editor();
   void set_text(const std::string& text);
-  const std::string& text() const { return text_; }
-  void set_cursor(int pos);
-  int cursor() const { return cursor_; }
+  std::string text() const;
+  void set_cursor(int line, int col);
+  int cursor_line() const { return cursor_line_; }
+  int cursor_col() const { return cursor_col_; }
+  int cursor_pos() const { return cursor_pos(); } // Total position
 
   void insert(char c);
   void insert_string(const std::string& s);
@@ -26,8 +28,11 @@ class Editor {
   void delete_char();
   void move_left();
   void move_right();
+  void move_up();
+  void move_down();
   void move_home();
   void move_end();
+  void new_line(); // Enter key - new line
   void clear();
 
   std::vector<std::string> render(size_t width) const;
@@ -36,8 +41,10 @@ class Editor {
   OnChange on_change;
 
  private:
-  std::string text_;
-  int cursor_ = 0;
+  std::vector<std::string> lines_;
+  int cursor_line_ = 0;
+  int cursor_col_ = 0;
+  void update_cursor_pos();
 };
 
 }  // namespace karta::tui

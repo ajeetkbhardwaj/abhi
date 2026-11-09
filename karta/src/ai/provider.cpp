@@ -10,6 +10,7 @@
 
 #include "karta/core/auth.h"
 #include "karta/ai/http.h"
+#include "karta/core/id.h"
 
 namespace karta {
 
@@ -364,12 +365,18 @@ ModelSpec resolve_model_spec(const std::string& provider_arg, const std::string&
     }
   }
   if (spec.provider.empty()) spec.provider = "anthropic";
-  if (spec.model.empty()) {
-    spec.model = spec.provider == "anthropic" ? "claude-sonnet-4-5"
-                  : spec.provider == "openai"  ? "gpt-4o-mini"
-                  : spec.provider == "nvidia"  ? "nvidia/nemotron-3.5-lightning-30b-a3b"
-                  : spec.provider == "ollama"  ? "llama3.1"
-                                               : "default";
+if (spec.model.empty()) {
+    if (spec.provider == "anthropic") spec.model = "claude-sonnet-4-5";
+    else if (spec.provider == "openai") spec.model = "gpt-4o-mini";
+    else if (spec.provider == "openrouter") spec.model = "openai/gpt-4o-mini";
+    else if (spec.provider == "groq") spec.model = "llama-3.1-70b-versatile";
+    else if (spec.provider == "deepseek") spec.model = "deepseek-chat";
+    else if (spec.provider == "xai") spec.model = "grok-beta";
+    else if (spec.provider == "mistral") spec.model = "mistral-large-latest";
+    else if (spec.provider == "nvidia") spec.model = "nvidia/nemotron-3.5-lightning-30b-a3b";
+    else if (spec.provider == "ollama") spec.model = "llama3.1";
+    else if (spec.provider == "lmstudio") spec.model = "local-model";
+    else spec.model = "default";
   }
 
   const auto it = providers().find(spec.provider);
@@ -484,6 +491,10 @@ AssistantTurn stream_openai(const ModelSpec& spec, const LlmRequest& request,
       if (call["id"].is_string()) slot.id = call["id"].as_string();
       if (call["function"]["name"].is_string()) slot.name = call["function"]["name"].as_string();
       if (call["function"]["arguments"].is_string()) slot.arguments += call["function"]["arguments"].as_string();
+      // Generate idempotency key when we first get the tool call ID
+      if (slot.idempotency_key.empty() && !slot.id.empty()) {
+        slot.idempotency_key = "idem-" + Id::uuidv7();
+      }
     }
     if (choice["finish_reason"].is_string()) {
       const std::string reason = choice["finish_reason"].as_string();
@@ -580,6 +591,8 @@ AssistantTurn stream_anthropic(const ModelSpec& spec, const LlmRequest& request,
         ToolCall call;
         call.id = block["id"].as_string();
         call.name = block["name"].as_string();
+        // Generate idempotency key for deduplication
+        call.idempotency_key = "idem-" + Id::uuidv7();
         blocks[index] = call;
       }
     } else if (type == "content_block_delta") {
@@ -665,11 +678,33 @@ AssistantTurn stream_completion(const ModelSpec& spec, const LlmRequest& request
 
 // ------------------------------------------------------------ Agent messages
 
+Json image_block(const std::string& base64_data, const std::string& mime_type) {
+  Json block = Json::object();
+  block.set("type", "image");
+  block.set("data", base64_data);
+  block.set("mimeType", mime_type);
+  return block;
+}
+
 Json make_user_message(const std::string& text) {
   Json message = Json::object();
   message.set("role", "user");
   Json content = Json::array();
   content.push_back(text_block(text));
+  message.set("content", content);
+  message.set("timestamp", now_millis());
+  return message;
+}
+
+// Extended version supporting text + images
+Json make_user_message_with_images(const std::string& text, const std::vector<std::pair<std::string, std::string>>& images) {
+  Json message = Json::object();
+  message.set("role", "user");
+  Json content = Json::array();
+  content.push_back(text_block(text));
+  for (const auto& img : images) {
+    content.push_back(image_block(img.first, img.second));
+  }
   message.set("content", content);
   message.set("timestamp", now_millis());
   return message;
@@ -712,6 +747,27 @@ Json make_tool_result_message(const std::string& call_id, const std::string& too
   message.set("content", content);
   message.set("isError", is_error);
   message.set("timestamp", now_millis());
+  return message;
+}
+
+// Extended version with structured content matching pi format
+Json make_tool_result_message_extended(const std::string& call_id,
+                                       const std::string& tool_name,
+                                       const Json& content,
+                                       bool is_error,
+                                       const Json* details,
+                                       const Json* usage,
+                                       long long duration_ms) {
+  Json message = Json::object();
+  message.set("role", "toolResult");
+  message.set("toolCallId", call_id);
+  message.set("toolName", tool_name);
+  message.set("content", content);
+  message.set("isError", is_error);
+  message.set("timestamp", now_millis());
+  if (details) message.set("details", *details);
+  if (usage) message.set("usage", *usage);
+  if (duration_ms >= 0) message.set("durationMs", duration_ms);
   return message;
 }
 
