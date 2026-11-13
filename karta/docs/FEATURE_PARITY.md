@@ -40,7 +40,7 @@ This document catalogs the status of each feature from the original `pi`/pi-agen
 - ✅ Status-line spinner and header (provider, model, cwd, session id)
 - ✅ `/login`, `/logout`, `/model` provider connection flow with saved credentials
 - ✅ Agent and model-fetch workers with cancellation (Esc aborts HTTP)
-- ❌ Markdown rendering, images, mouse, clipboard, autocomplete, themes, kill-ring/undo
+- ❌ Markdown rendering, images, mouse, clipboard, autocomplete, themes, kill-ring redo/undo
 - See `karta/docs/TUI.md` for the pi-component mapping
 
 ### Core infrastructure

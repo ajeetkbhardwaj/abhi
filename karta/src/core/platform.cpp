@@ -156,6 +156,14 @@ bool stdout_is_tty() {
 #endif
 }
 
+bool stdin_is_tty() {
+#ifdef _WIN32
+  return _isatty(_fileno(stdin)) != 0;
+#else
+  return isatty(STDIN_FILENO) != 0;
+#endif
+}
+
 #ifdef _WIN32
 
 namespace {

@@ -3,6 +3,8 @@ karta/api.txt
 .env
 .env.*
 *.key
+deepwiki/
+Screenshot 2026-11-14 at 1.28.30 AM.png
 
 # Build output and vendored reference clone
 karta/build/

@@ -8,6 +8,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <memory>
+
+#include "karta/tui/editor.h"
 
 namespace karta::tui {
 
@@ -75,6 +78,12 @@ enum class Key {
   F10,
   F11,
   F12,
+  // Clipboard
+  Copy,
+  Paste,
+  // Editor
+  CtrlZ,
+  CtrlY,
 };
 
 struct SessionInfo {
@@ -86,9 +95,28 @@ struct SessionInfo {
   std::string id;
 };
 
+struct ThemeColors {
+  int normal = -1;
+  int dim = -1;
+  int bold = -1;
+  int accent = -1;
+  int user = -1;
+  int assistant = -1;
+  int success = -1;
+  int error = -1;
+  int status = -1;
+  int header_bg = -1;
+  int header_fg = -1;
+  int input_bg = -1;
+  int input_fg = -1;
+  int selection_bg = -1;
+  int selection_fg = -1;
+};
+
 struct TuiOptions {
   size_t min_rows = 10;
   size_t min_cols = 40;
+  ThemeColors theme;
 };
 
 class Tui {
@@ -112,6 +140,9 @@ class Tui {
   void append_line(const std::string& text, Style style = Style::Normal);
   void append_text(const std::string& text, Style style = Style::Normal);
 
+  // Markdown rendering
+  void append_markdown(const std::string& text, Style base_style);
+
   // Streaming assistant text: begin, feed deltas, end.
   void stream_begin(Style style = Style::Normal);
   void stream_delta(const std::string& delta);
@@ -126,6 +157,18 @@ class Tui {
   const std::string& input() const { return input_; }
   void set_input(const std::string& value);
   void set_input_hidden(bool hidden);
+
+  // Multi-line input support
+  void set_multiline(bool enabled);
+  bool multiline() const { return multiline_; }
+  std::string input_text() const;  // Returns full text including newlines
+  void set_input_text(const std::string& text);
+  Editor* editor() const { return editor_.get(); }
+
+  // Theme support
+  void apply_theme(const ThemeColors& theme);
+  void save_theme(const std::string& path = "") const;
+  void load_theme(const std::string& path = "");
 
   // Non-blocking. Handles line editing (characters, backspace, arrows, history).
   Key poll(int* ch = nullptr);
@@ -172,8 +215,19 @@ class Tui {
   std::string history_draft_;
 
   bool colors_ = false;
+  ThemeColors theme_;
   std::vector<std::string> overlay_lines_;
   int overlay_selected_ = -1;
+
+  // Multi-line input
+  std::unique_ptr<Editor> editor_;
+  bool multiline_ = false;
+
+  // Mouse selection for auto-copy
+  bool mouse_selecting_ = false;
+  int mouse_sel_start_ = 0;
+  int mouse_sel_end_ = 0;
+  void copy_selection_to_clipboard();
 };
 
 }  // namespace karta::tui

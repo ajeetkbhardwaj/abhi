@@ -1,11 +1,51 @@
 #include "karta/tui/editor.h"
+
 #include <algorithm>
+#include <chrono>
 
 namespace karta::tui {
 
 Editor::Editor() {}
 
-void Editor::set_text(const std::string& text) {
+std::string Editor::kill_ring() const { return kill_ring_text_; }
+void Editor::set_kill_ring(const std::string& text) { kill_ring_text_ = text; }
+int Editor::kill_ring_index() const { return kill_ring_idx_; }
+void Editor::kill_ring_next() { if (kill_ring_idx_ < static_cast<int>(kill_ring_text_.size())) kill_ring_idx_++; }
+void Editor::kill_ring_prev() { if (kill_ring_idx_ > 0) kill_ring_idx_--; }
+
+void Editor::undo() {
+  if (undo_stack_.empty()) return;
+  end_edit_group();
+  redo_stack_.push_back(text());
+  std::string prev = undo_stack_.back();
+  undo_stack_.pop_back();
+  set_text_without_undo(prev);
+}
+
+void Editor::redo() {
+  if (redo_stack_.empty()) return;
+  end_edit_group();
+  undo_stack_.push_back(text());
+  std::string next = redo_stack_.back();
+  redo_stack_.pop_back();
+  set_text_without_undo(next);
+}
+
+void Editor::end_edit_group() {
+  if (in_edit_group_) {
+    in_edit_group_ = false;
+    // Save the final state of this edit group
+    if (undo_stack_.empty() || undo_stack_.back() != text()) {
+      undo_stack_.push_back(text());
+      redo_stack_.clear();
+    }
+  }
+}
+
+int Editor::undo_history_size() const { return static_cast<int>(undo_stack_.size()); }
+int Editor::redo_history_size() const { return static_cast<int>(redo_stack_.size()); }
+
+void Editor::set_text_without_undo(const std::string& text) {
   lines_.clear();
   size_t start = 0;
   while (true) {
@@ -23,18 +63,10 @@ void Editor::set_text(const std::string& text) {
   if (on_change) on_change(this->text());
 }
 
-void Editor::set_cursor(int line, int col) {
-  if (line < 0) line = 0;
-  if (line >= static_cast<int>(lines_.size())) line = static_cast<int>(lines_.size()) - 1;
-  cursor_line_ = line;
-  if (col < 0) col = 0;
-  if (col > static_cast<int>(lines_[line].size())) col = static_cast<int>(lines_[line].size());
-  cursor_col_ = col;
-  update_cursor_pos();
-}
-
-void Editor::update_cursor_pos() {
-  if (on_change) on_change(text());
+void Editor::set_text(const std::string& text) {
+  undo_stack_.push_back(this->text());
+  redo_stack_.clear();
+  set_text_without_undo(text);
 }
 
 std::string Editor::text() const {
@@ -46,8 +78,33 @@ std::string Editor::text() const {
   return result;
 }
 
+void Editor::set_cursor(int line, int col) {
+  if (line < 0) line = 0;
+  if (line >= static_cast<int>(lines_.size())) line = static_cast<int>(lines_.size()) - 1;
+  cursor_line_ = line;
+  if (col < 0) col = 0;
+  if (col > static_cast<int>(lines_[line].size())) col = static_cast<int>(lines_[line].size());
+  cursor_col_ = col;
+  update_cursor_pos();
+}
+
+void Editor::maybe_save_undo() {
+  if (!in_edit_group_) {
+    // Start new edit group
+    in_edit_group_ = true;
+    undo_stack_.push_back(text());
+    redo_stack_.clear();
+  }
+  last_edit_time_ = std::chrono::steady_clock::now();
+}
+
+void Editor::update_cursor_pos() {
+  if (on_change) on_change(text());
+}
+
 void Editor::insert(char c) {
   if (cursor_line_ >= 0 && cursor_line_ < static_cast<int>(lines_.size())) {
+    maybe_save_undo();
     lines_[cursor_line_].insert(lines_[cursor_line_].begin() + cursor_col_, c);
     ++cursor_col_;
     update_cursor_pos();
@@ -56,6 +113,7 @@ void Editor::insert(char c) {
 
 void Editor::insert_string(const std::string& s) {
   if (cursor_line_ >= 0 && cursor_line_ < static_cast<int>(lines_.size())) {
+    maybe_save_undo();
     lines_[cursor_line_].insert(cursor_col_, s);
     cursor_col_ += static_cast<int>(s.size());
     update_cursor_pos();
@@ -63,12 +121,15 @@ void Editor::insert_string(const std::string& s) {
 }
 
 void Editor::backspace() {
+  end_edit_group();
+  undo_stack_.push_back(text());
+  redo_stack_.clear();
+
   if (cursor_col_ > 0) {
     lines_[cursor_line_].erase(cursor_col_ - 1, 1);
     --cursor_col_;
     update_cursor_pos();
   } else if (cursor_line_ > 0) {
-    // Join with previous line
     std::string prev = lines_[cursor_line_ - 1];
     std::string curr = lines_[cursor_line_];
     cursor_col_ = static_cast<int>(prev.size());
@@ -80,11 +141,14 @@ void Editor::backspace() {
 }
 
 void Editor::delete_char() {
+  end_edit_group();
+  undo_stack_.push_back(text());
+  redo_stack_.clear();
+
   if (cursor_line_ >= 0 && cursor_line_ < static_cast<int>(lines_.size()) && cursor_col_ < static_cast<int>(lines_[cursor_line_].size())) {
     lines_[cursor_line_].erase(cursor_col_, 1);
     update_cursor_pos();
   } else if (cursor_line_ + 1 < static_cast<int>(lines_.size())) {
-    // Join with next line
     lines_[cursor_line_] += lines_[cursor_line_ + 1];
     lines_.erase(lines_.begin() + cursor_line_ + 1);
     update_cursor_pos();
@@ -92,6 +156,7 @@ void Editor::delete_char() {
 }
 
 void Editor::move_left() {
+  end_edit_group();
   if (cursor_col_ > 0) {
     --cursor_col_;
   } else if (cursor_line_ > 0) {
@@ -102,6 +167,7 @@ void Editor::move_left() {
 }
 
 void Editor::move_right() {
+  end_edit_group();
   if (cursor_line_ >= 0 && cursor_line_ < static_cast<int>(lines_.size()) && cursor_col_ < static_cast<int>(lines_[cursor_line_].size())) {
     ++cursor_col_;
   } else if (cursor_line_ + 1 < static_cast<int>(lines_.size())) {
@@ -112,31 +178,35 @@ void Editor::move_right() {
 }
 
 void Editor::move_up() {
+  end_edit_group();
   if (cursor_line_ > 0) {
     --cursor_line_;
     if (cursor_col_ > static_cast<int>(lines_[cursor_line_].size())) {
       cursor_col_ = static_cast<int>(lines_[cursor_line_].size());
     }
-    update_cursor_pos();
   }
+  update_cursor_pos();
 }
 
 void Editor::move_down() {
+  end_edit_group();
   if (cursor_line_ + 1 < static_cast<int>(lines_.size())) {
     ++cursor_line_;
     if (cursor_col_ > static_cast<int>(lines_[cursor_line_].size())) {
       cursor_col_ = static_cast<int>(lines_[cursor_line_].size());
     }
-    update_cursor_pos();
   }
+  update_cursor_pos();
 }
 
 void Editor::move_home() {
+  end_edit_group();
   cursor_col_ = 0;
   update_cursor_pos();
 }
 
 void Editor::move_end() {
+  end_edit_group();
   if (cursor_line_ >= 0 && cursor_line_ < static_cast<int>(lines_.size())) {
     cursor_col_ = static_cast<int>(lines_[cursor_line_].size());
     update_cursor_pos();
@@ -144,6 +214,7 @@ void Editor::move_end() {
 }
 
 void Editor::new_line() {
+  end_edit_group();
   if (cursor_line_ >= 0 && cursor_line_ < static_cast<int>(lines_.size())) {
     std::string curr = lines_[cursor_line_];
     std::string left = curr.substr(0, cursor_col_);
@@ -157,6 +228,10 @@ void Editor::new_line() {
 }
 
 void Editor::clear() {
+  end_edit_group();
+  undo_stack_.push_back(text());
+  redo_stack_.clear();
+
   lines_.clear();
   lines_.push_back("");
   cursor_line_ = 0;
@@ -167,10 +242,29 @@ void Editor::clear() {
 std::vector<std::string> Editor::render(size_t width) const {
   std::vector<std::string> result;
   for (const auto& line : lines_) {
-    result.push_back(line);
+    if (width > 0 && line.size() >= width) {
+      // Wrap long lines
+      for (size_t i = 0; i < line.size(); i += width) {
+        result.push_back(line.substr(i, width));
+      }
+    } else {
+      result.push_back(line);
+    }
   }
   if (result.empty()) result.push_back("");
   return result;
+}
+
+// Calculate screen cursor position (row, col) for given width
+std::pair<int, int> Editor::cursor_screen_pos(size_t width) const {
+  int screen_row = 0;
+  for (int i = 0; i < cursor_line_; ++i) {
+    const std::string& line = lines_[i];
+    int wrapped_lines = std::max(1, static_cast<int>((line.size() + width - 1) / width));
+    screen_row += wrapped_lines;
+  }
+  int screen_col = cursor_col_ % width;
+  return {screen_row, screen_col};
 }
 
 }  // namespace karta::tui

@@ -466,7 +466,7 @@ int run_cli(const CliOptions& options) {
 
 #ifdef KARTA_TUI
   // Bare `karta` opens the terminal UI; pipes and prompts keep the plain modes.
-  if (interactive && (options.tui || stdout_is_tty())) {
+  if (interactive && (options.tui || stdout_is_tty() || stdin_is_tty())) {
     TuiAppOptions tui_options;
     tui_options.agent = std::move(agent_options);
     tui_options.session = session.get();

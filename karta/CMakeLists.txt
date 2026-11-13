@@ -59,6 +59,8 @@ if(KARTA_BUILD_TUI)
     src/tui/loader.cpp
     src/tui/scroll-view.cpp
     src/tui/editor.cpp
+    src/tui/markdown.cpp
+    src/tui/clipboard.cpp
   )
   message(STATUS "TUI enabled - `karta` opens the terminal UI when attached to a TTY")
 else()

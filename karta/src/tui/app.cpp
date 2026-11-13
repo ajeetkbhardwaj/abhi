@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include <curses.h>
+
 #include "karta/core/auth.h"
 #include "karta/core/json.h"
 #include "karta/ai/provider.h"
@@ -264,9 +266,17 @@ void TuiApp::handle_key(tui::Key key, int /*ch*/) {
   switch (key) {
     case tui::Key::Enter: {
       const std::string line = ui_.input();
-      ui_.set_input("");
-      clear_completion();
-      handle_submit(line);
+      if (ui_.multiline()) {
+        const std::string text = ui_.input_text();
+        ui_.set_input_text("");
+        ui_.set_multiline(false);
+        clear_completion();
+        handle_submit(text);
+      } else {
+        ui_.set_input("");
+        clear_completion();
+        handle_submit(line);
+      }
       return;
     }
     case tui::Key::CtrlC:
@@ -337,10 +347,16 @@ void TuiApp::handle_command(const std::string& line) {
     say("  /model [id]         list and pick a model (or set one directly)", tui::Style::Normal);
     say("  /provider [name]    show or switch the provider", tui::Style::Normal);
     say("  /thinking [0-3|off|low|medium|high]  set thinking level (default 1)", tui::Style::Normal);
+    say("  /theme [name]       set color theme (default, dark, light, mono)", tui::Style::Normal);
     say("  /session            show the session file", tui::Style::Normal);
     say("  /clear              clear the transcript", tui::Style::Normal);
+    say("  /undo               undo last edit (multi-line)", tui::Style::Normal);
+    say("  /redo               redo last edit (multi-line)", tui::Style::Normal);
     say("  /exit               quit (Esc cancels a turn, Ctrl+D at empty prompt)", tui::Style::Normal);
     say("  Ctrl+L              refresh screen", tui::Style::Normal);
+    say("  Ctrl+Z              undo (multi-line)", tui::Style::Normal);
+    say("  Ctrl+Y              redo (multi-line)", tui::Style::Normal);
+    say("  Enter               submit (multi-line: Shift+Enter for new line)", tui::Style::Normal);
     return;
   }
   if (name == "thinking" || name == "think") {
@@ -415,6 +431,86 @@ void TuiApp::handle_command(const std::string& line) {
   }
   if (name == "clear") {
     ui_.clear_transcript();
+    return;
+  }
+  if (name == "theme") {
+    if (argument.empty()) {
+      say("Current theme: default", tui::Style::Normal);
+      say("Available: default, dark, light, mono", tui::Style::Dim);
+      return;
+    }
+    tui::ThemeColors theme;
+    if (argument == "dark") {
+      theme.normal = COLOR_WHITE;
+      theme.accent = COLOR_CYAN;
+      theme.user = COLOR_YELLOW;
+      theme.assistant = COLOR_MAGENTA;
+      theme.success = COLOR_GREEN;
+      theme.error = COLOR_RED;
+      theme.dim = -1;
+      theme.bold = -1;
+      theme.status = -1;
+      theme.header_bg = COLOR_BLUE;
+      theme.header_fg = COLOR_WHITE;
+      theme.input_bg = COLOR_BLACK;
+      theme.input_fg = COLOR_WHITE;
+      theme.selection_bg = COLOR_CYAN;
+      theme.selection_fg = COLOR_BLACK;
+    } else if (argument == "light") {
+      theme.normal = COLOR_BLACK;
+      theme.accent = COLOR_BLUE;
+      theme.user = COLOR_MAGENTA;
+      theme.assistant = COLOR_CYAN;
+      theme.success = COLOR_GREEN;
+      theme.error = COLOR_RED;
+      theme.dim = -1;
+      theme.bold = -1;
+      theme.status = -1;
+      theme.header_bg = COLOR_WHITE;
+      theme.header_fg = COLOR_BLACK;
+      theme.input_bg = COLOR_WHITE;
+      theme.input_fg = COLOR_BLACK;
+      theme.selection_bg = COLOR_BLUE;
+      theme.selection_fg = COLOR_WHITE;
+    } else if (argument == "mono") {
+      theme.normal = -1;
+      theme.accent = -1;
+      theme.user = -1;
+      theme.assistant = -1;
+      theme.success = -1;
+      theme.error = -1;
+      theme.dim = -1;
+      theme.bold = -1;
+      theme.status = -1;
+      theme.header_bg = -1;
+      theme.header_fg = -1;
+      theme.input_bg = -1;
+      theme.input_fg = -1;
+      theme.selection_bg = -1;
+      theme.selection_fg = -1;
+    } else {
+      // default - reset to ncurses defaults
+    }
+    ui_.apply_theme(theme);
+    say("theme → " + argument, tui::Style::Accent);
+    return;
+  }
+  if (name == "undo") {
+    if (ui_.multiline() && ui_.editor()) {
+      ui_.editor()->undo();
+      say("undone", tui::Style::Accent);
+    } else {
+      say("undo only available in multi-line mode", tui::Style::Dim);
+    }
+    return;
+  }
+  if (name == "redo") {
+    if (ui_.multiline() && ui_.editor()) {
+      ui_.editor()->redo();
+      say("redone", tui::Style::Accent);
+    } else {
+      say("redo only available in multi-line mode", tui::Style::Dim);
+    }
     return;
   }
   say("unknown command /" + name + " — /help for the list", tui::Style::Error);
@@ -802,6 +898,69 @@ bool contains_ic(const std::string& hay, const std::string& needle) {
     [](char a,char b){ return std::tolower((unsigned char)a)==std::tolower((unsigned char)b); });
   return it != hay.end();
 }
+
+// Robust fuzzy matching using Smith-Waterman style algorithm (like fzf/skim)
+// Returns score: higher = better match, 0 = no match
+int fuzzy_match(const std::string& hay, const std::string& needle) {
+  if (needle.empty()) return 100;
+  if (hay.empty()) return 0;
+  
+  std::string h = hay;
+  std::string n = needle;
+  std::transform(h.begin(), h.end(), h.begin(), [](unsigned char c){ return std::tolower(c); });
+  std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c){ return std::tolower(c); });
+  
+  const int match_bonus = 10;
+  const int gap_penalty = -3;
+  const int mismatch_penalty = -1;
+  
+  // DP matrix for local alignment (Smith-Waterman)
+  std::vector<std::vector<int>> dp(n.size() + 1, std::vector<int>(h.size() + 1, 0));
+  int max_score = 0;
+  
+  for (std::size_t i = 1; i <= n.size(); ++i) {
+    for (std::size_t j = 1; j <= h.size(); ++j) {
+      int match = (n[i-1] == h[j-1]) ? match_bonus : mismatch_penalty;
+      int diag = dp[i-1][j-1] + match;
+      int up = dp[i-1][j] + gap_penalty;
+      int left = dp[i][j-1] + gap_penalty;
+      dp[i][j] = std::max({0, diag, up, left});
+      max_score = std::max(max_score, dp[i][j]);
+    }
+  }
+  
+  if (max_score <= 0) return 0;
+  
+  // Bonus scoring
+  int score = max_score;
+  
+  // Bonus for prefix match
+  if (h.size() >= n.size()) {
+    bool is_prefix = true;
+    for (std::size_t i = 0; i < n.size(); ++i) {
+      if (h[i] != n[i]) { is_prefix = false; break; }
+    }
+    if (is_prefix) score += 50;
+  }
+  
+  // Bonus for exact substring
+  if (h.find(n) != std::string::npos) score += 30;
+  
+  // Bonus for word boundary matches
+  for (std::size_t i = 0; i + n.size() <= h.size(); ++i) {
+    if (h.substr(i, n.size()) == n) {
+      bool word_boundary = (i == 0 || !std::isalnum(static_cast<unsigned char>(h[i-1]))) &&
+                           (i + n.size() == h.size() || !std::isalnum(static_cast<unsigned char>(h[i + n.size()])));
+      if (word_boundary) { score += 20; break; }
+    }
+  }
+  
+  // Bonus for early first character match
+  std::size_t first_pos = h.find(n[0]);
+  if (first_pos != std::string::npos && first_pos < 5) score += 10 - static_cast<int>(first_pos) * 2;
+  
+  return score;
+}
 }
 
 void TuiApp::clear_completion() {
@@ -827,8 +986,17 @@ void TuiApp::update_completion() {
       {"login","connect provider/key"},{"logout","forget saved key"},{"model","pick or set model"},
       {"provider","show/switch provider"},{"thinking","0 off,1 default,2 medium,3 high"},
       {"session","show session file"},{"clear","clear transcript"},{"help","show commands"},{"exit","quit"}};
-    for (auto& c: cmds) if (contains_ic(c.first, completion_prefix_)) {
-      completion_filtered_.push_back((int)completion_all_.size()); completion_all_.push_back(c);
+    struct ScoredItem { int score; int idx; };
+    std::vector<ScoredItem> scored;
+    for (std::size_t i = 0; i < cmds.size(); ++i) {
+      int score = fuzzy_match(cmds[i].first, completion_prefix_);
+      if (score > 0) scored.push_back({score, static_cast<int>(i)});
+    }
+    std::sort(scored.begin(), scored.end(),
+      [](const ScoredItem& a, const ScoredItem& b) { return a.score > b.score; });
+    for (const auto& s : scored) {
+      completion_filtered_.push_back(static_cast<int>(completion_all_.size()));
+      completion_all_.push_back(cmds[static_cast<std::size_t>(s.idx)]);
     }
   } else if ((in.rfind("/model ",0)==0) || (in.rfind("/models ",0)==0) || lower(trim(in))=="/model" || lower(trim(in))=="/models") {
     const size_t sp = in.find(' ');
@@ -840,11 +1008,23 @@ void TuiApp::update_completion() {
     if (all_models_.empty() && !models_loading_all_) { begin_all_model_pick(); return; }
     if (!all_models_.empty()) {
       completion_kind_ = CompletionKind::Model;
-      for (auto& pm: all_models_) {
+      struct ScoredItem { int score; int idx; };
+      std::vector<ScoredItem> scored;
+      for (std::size_t i = 0; i < all_models_.size(); ++i) {
+        const auto& pm = all_models_[i];
         std::string show = pm.first + "/" + pm.second;
-        if (contains_ic(show, completion_prefix_) || contains_ic(pm.second, completion_prefix_)) {
-          completion_filtered_.push_back((int)completion_all_.size()); completion_all_.push_back({pm.first, pm.second}); // value=model, label stored in desc? reuse pair (provider,model)
+        int score = fuzzy_match(show, completion_prefix_);
+        if (score > 0 || contains_ic(pm.second, completion_prefix_)) {
+          scored.push_back({score, static_cast<int>(i)});
         }
+      }
+      // Sort by score descending
+      std::sort(scored.begin(), scored.end(),
+        [](const ScoredItem& a, const ScoredItem& b) { return a.score > b.score; });
+      for (const auto& s : scored) {
+        const auto& pm = all_models_[static_cast<std::size_t>(s.idx)];
+        completion_filtered_.push_back(static_cast<int>(completion_all_.size()));
+        completion_all_.push_back({pm.first, pm.second});
       }
     }
   }
