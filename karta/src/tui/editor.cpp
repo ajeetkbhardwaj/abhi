@@ -7,7 +7,14 @@ namespace karta::tui {
 
 Editor::Editor() {}
 
-std::string Editor::kill_ring() const { return kill_ring_text_; }
+int Editor::cursor_pos() const {
+  int pos = 0;
+  for (int i = 0; i < cursor_line_ && i < static_cast<int>(lines_.size()); ++i) {
+    pos += static_cast<int>(lines_[i].size()) + 1; // +1 for newline
+  }
+  pos += cursor_col_;
+  return pos;
+}
 void Editor::set_kill_ring(const std::string& text) { kill_ring_text_ = text; }
 int Editor::kill_ring_index() const { return kill_ring_idx_; }
 void Editor::kill_ring_next() { if (kill_ring_idx_ < static_cast<int>(kill_ring_text_.size())) kill_ring_idx_++; }

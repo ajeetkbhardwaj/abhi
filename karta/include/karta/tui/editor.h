@@ -20,7 +20,7 @@ class Editor {
   void set_cursor(int line, int col);
   int cursor_line() const { return cursor_line_; }
   int cursor_col() const { return cursor_col_; }
-  int cursor_pos() const { return cursor_pos(); } // Total position
+  int cursor_pos() const;
 
   void insert(char c);
   void insert_string(const std::string& s);

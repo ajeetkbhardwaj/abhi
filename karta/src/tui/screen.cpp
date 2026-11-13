@@ -832,7 +832,20 @@ static void put_line(int row, const std::string& text, std::size_t cols) {
     out.push_back(wc);
     width += w;
   }
-  mvaddnwstr(row, 0, out.c_str(), static_cast<int>(out.size()));
+  // Convert back to UTF-8 for cross-platform output (mvaddnwstr not available on macOS)
+  std::string out_mb;
+  if (!out.empty()) {
+    state = std::mbstate_t{};
+    const wchar_t* wsrc = out.c_str();
+    size_t mblen = std::wcsrtombs(nullptr, &wsrc, 0, &state);
+    if (mblen != static_cast<size_t>(-1)) {
+      out_mb.resize(mblen);
+      std::wcsrtombs(out_mb.data(), &wsrc, mblen, &state);
+    }
+  }
+  if (!out_mb.empty()) {
+    mvaddnstr(row, 0, out_mb.c_str(), static_cast<int>(out_mb.size()));
+  }
 }
 
 void Tui::draw() {
@@ -850,12 +863,6 @@ void Tui::draw() {
 
   const std::size_t visible = visible_rows();
   const std::size_t total = lines_.size();
-  std::size_t start = 0;
-  if (total > visible) {
-    const std::size_t max_scroll = total - visible;
-    if (scroll_ > max_scroll) scroll_ = max_scroll;
-    start = max_scroll - scroll_;
-  }
 
   // reserve space for overlay above status
   int overlay_n = static_cast<int>(overlay_lines_.size());
